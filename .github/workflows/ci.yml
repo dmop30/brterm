@@ -1,0 +1,48 @@
+name: CI
+
+# サプライチェーン対策:
+#   - 外部アクションは全て commit SHA で固定する(タグは付け替え可能なため)
+#   - 更新は Dependabot が cooldown 経過後に PR で提案する。手で最新へ上げない
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# 既定を空にし、ジョブごとに必要な権限だけを与える
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # 後続ステップに認証情報を残さない
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20.11'
+          cache: npm
+
+      - name: 依存導入
+        # ネイティブアドオンを要求する依存が混ざっていないかも、ここで分かる
+        run: npm ci --no-audit --no-fund
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: 整形確認
+        run: npm run fmt:check
+
+      - name: test
+        run: npm test
+
+      - name: build
+        run: npm run build

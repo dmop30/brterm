@@ -1,0 +1,14 @@
+{
+  // サーバ側。Node の解決規則に合わせるため、相対 import には .js を付ける。
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "rootDir": "..",
+    "outDir": "../../dist",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["./**/*.ts", "../shared/**/*.ts"]
+}

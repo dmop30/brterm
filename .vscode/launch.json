@@ -1,0 +1,48 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "サーバを起動してデバッグ (tsx)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/server/index.ts",
+      "runtimeExecutable": "${workspaceFolder}/node_modules/.bin/tsx",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"],
+      "env": {
+        "NODE_ENV": "development"
+      }
+    },
+    {
+      "name": "テストをデバッグ (node --test)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--import", "tsx", "--test", "${relativeFile}"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "テスト全件をデバッグ",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--import", "tsx", "--test", "tests/**/*.test.ts"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "画面を Chrome で開く (要 npm run dev)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:5273",
+      "webRoot": "${workspaceFolder}/src/client"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "サーバ + 画面",
+      "configurations": ["サーバを起動してデバッグ (tsx)", "画面を Chrome で開く (要 npm run dev)"]
+    }
+  ]
+}
