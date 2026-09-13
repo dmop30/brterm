@@ -32,7 +32,10 @@ if (files.length === 0) {
 }
 console.error(`テスト対象 ${files.length} ファイル`);
 
-const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...files], {
-  stdio: 'inherit',
-});
+// 1 件あたりの上限を置く。既定は無制限で、繋ぎっぱなしの試験が CI を止めてしまう。
+const result = spawnSync(
+  process.execPath,
+  ['--import', 'tsx', '--test', '--test-timeout', '30000', ...files],
+  { stdio: 'inherit' },
+);
 process.exit(result.status ?? 1);
