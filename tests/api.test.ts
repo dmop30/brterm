@@ -7,7 +7,7 @@ import { after, test } from 'node:test';
 
 import { createContext } from '../src/server/context.js';
 import { createApp } from '../src/server/index.js';
-import { DB_FILE } from '../src/server/store.js';
+import { DB_FILE, loadDatabase } from '../src/server/store.js';
 
 interface Started {
   url: string;
@@ -224,6 +224,162 @@ test('設定を読んで変えられる', async () => {
   assert.equal(updated.settings.theme, 'dark');
   // 青天井にしない
   assert.equal(updated.settings.historyLimit, 100000);
+});
+
+async function createHost(instance: Started, label: string): Promise<string> {
+  const response = await fetch(`${instance.url}/api/hosts`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ label, hostname: `${label}.example.jp`, username: 'ops' }),
+  });
+  return ((await response.json()) as { host: { id: string } }).host.id;
+}
+
+test('ブックマークを追加すると保存され、読み込み直しても残る', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  const created = await fetch(`${instance.url}/api/bookmarks`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ hostId, path: '/etc/nginx/' }),
+  });
+  assert.equal(created.status, 201);
+  const body = (await created.json()) as { bookmark: { path: string; label: string } };
+  assert.equal(body.bookmark.path, '/etc/nginx');
+  assert.equal(body.bookmark.label, 'nginx');
+
+  // 保存ファイルから読み直す（再起動と同じこと）
+  const reloaded = loadDatabase(instance.dir);
+  assert.equal(reloaded.bookmarks.length, 1);
+  assert.equal(reloaded.bookmarks[0]?.path, '/etc/nginx');
+});
+
+test('同じ接続先の同じパスを 2 回追加しても増えない', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  for (const label of ['nginx', 'nginx 設定']) {
+    await fetch(`${instance.url}/api/bookmarks`, {
+      method: 'POST',
+      headers: auth(instance),
+      body: JSON.stringify({ hostId, path: '/etc/nginx', label }),
+    });
+  }
+  const listed = await fetch(`${instance.url}/api/bookmarks?hostId=${hostId}`, {
+    headers: auth(instance),
+  });
+  const body = (await listed.json()) as { bookmarks: { label: string }[] };
+  assert.equal(body.bookmarks.length, 1);
+  assert.equal(body.bookmarks[0]?.label, 'nginx 設定');
+});
+
+test('無い接続先にはブックマークを作れない', async () => {
+  const instance = await start();
+  const response = await fetch(`${instance.url}/api/bookmarks`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ hostId: 'いない', path: '/etc' }),
+  });
+  assert.equal(response.status, 404);
+});
+
+test('相対パスは受け付けない', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  const response = await fetch(`${instance.url}/api/bookmarks`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ hostId, path: 'etc/nginx' }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    'invalid_bookmark',
+  );
+});
+
+test('表示名を変えられる。ブックマークを消せる', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  const created = await fetch(`${instance.url}/api/bookmarks`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ hostId, path: '/var/log' }),
+  });
+  const { bookmark } = (await created.json()) as { bookmark: { id: string } };
+
+  const patched = await fetch(`${instance.url}/api/bookmarks/${bookmark.id}`, {
+    method: 'PATCH',
+    headers: auth(instance),
+    body: JSON.stringify({ label: 'ログ' }),
+  });
+  assert.equal(((await patched.json()) as { bookmark: { label: string } }).bookmark.label, 'ログ');
+
+  const deleted = await fetch(`${instance.url}/api/bookmarks/${bookmark.id}`, {
+    method: 'DELETE',
+    headers: auth(instance),
+  });
+  assert.equal(deleted.status, 204);
+
+  const missing = await fetch(`${instance.url}/api/bookmarks/${bookmark.id}`, {
+    method: 'DELETE',
+    headers: auth(instance),
+  });
+  assert.equal(missing.status, 404);
+});
+
+test('並べ替えた順が保存される', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  const ids: string[] = [];
+  for (const path of ['/etc/nginx', '/var/log', '~/deploy']) {
+    const response = await fetch(`${instance.url}/api/bookmarks`, {
+      method: 'POST',
+      headers: auth(instance),
+      body: JSON.stringify({ hostId, path }),
+    });
+    ids.push(((await response.json()) as { bookmark: { id: string } }).bookmark.id);
+  }
+  const reversed = [...ids].reverse();
+  const response = await fetch(`${instance.url}/api/bookmarks/reorder`, {
+    method: 'POST',
+    headers: auth(instance),
+    body: JSON.stringify({ hostId, ids: reversed }),
+  });
+  const body = (await response.json()) as { bookmarks: { id: string }[] };
+  assert.deepEqual(
+    body.bookmarks.map((entry) => entry.id),
+    reversed,
+  );
+  assert.deepEqual(
+    loadDatabase(instance.dir)
+      .bookmarks.sort((a, b) => a.order - b.order)
+      .map((entry) => entry.id),
+    reversed,
+  );
+});
+
+test('接続先を消すと、その接続先のブックマークも消える', async () => {
+  const instance = await start();
+  const hostId = await createHost(instance, 'web-01');
+  const otherId = await createHost(instance, 'db-02');
+  for (const id of [hostId, otherId]) {
+    await fetch(`${instance.url}/api/bookmarks`, {
+      method: 'POST',
+      headers: auth(instance),
+      body: JSON.stringify({ hostId: id, path: '/etc/nginx' }),
+    });
+  }
+  await fetch(`${instance.url}/api/hosts/${hostId}`, { method: 'DELETE', headers: auth(instance) });
+
+  const listed = await fetch(`${instance.url}/api/bookmarks`, { headers: auth(instance) });
+  const body = (await listed.json()) as { bookmarks: { hostId: string }[] };
+  assert.equal(body.bookmarks.length, 1);
+  assert.equal(body.bookmarks[0]?.hostId, otherId);
+});
+
+test('ブックマークもトークン無しでは触れない', async () => {
+  const instance = await start();
+  assert.equal((await fetch(`${instance.url}/api/bookmarks`)).status, 401);
 });
 
 test('プロファイルの既定は UTF-8', async () => {

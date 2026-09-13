@@ -59,6 +59,7 @@ export function defaultDatabase(): Database {
     schedules: [],
     history: [],
     knownHostKeys: [],
+    bookmarks: [],
     settings: defaultSettings(),
   };
 }
@@ -117,6 +118,7 @@ export function loadDatabase(dir: string = dataDir()): Database {
     schedules: db.schedules ?? base.schedules,
     history: db.history ?? base.history,
     knownHostKeys: db.knownHostKeys ?? base.knownHostKeys,
+    bookmarks: db.bookmarks ?? base.bookmarks,
     settings: { ...base.settings, ...(db.settings ?? {}) },
   };
 }

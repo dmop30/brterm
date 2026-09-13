@@ -118,6 +118,22 @@ export interface Schedule {
   lastStatus?: 'ok' | 'failed' | 'skipped';
 }
 
+/**
+ * ディレクトリのブックマーク。
+ * 接続先ごとに持ち、`db.json` に保存する(ブラウザ側には持たない)。
+ */
+export interface Bookmark {
+  id: string;
+  hostId: string;
+  /** 絶対パス。末尾の `/` は持たない(`/` 自身を除く)。 */
+  path: string;
+  /** 画面に出す名前。既定はパスの末尾のフォルダ名。 */
+  label: string;
+  /** 並び順。小さいほど上。 */
+  order: number;
+  createdAt: string;
+}
+
 /** 既知のホスト鍵。指紋が変わったら接続しない。 */
 export interface KnownHostKey {
   hostname: string;
@@ -150,6 +166,7 @@ export interface Database {
   schedules: Schedule[];
   history: HistoryEntry[];
   knownHostKeys: KnownHostKey[];
+  bookmarks: Bookmark[];
   settings: Settings;
 }
 
