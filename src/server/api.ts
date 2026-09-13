@@ -10,7 +10,8 @@ import { randomUUID } from 'node:crypto';
 
 import express, { type Request, type Response, type Router } from 'express';
 
-import type { Host, Profile, Settings } from '../shared/types.js';
+import type { Bookmark, Host, Profile, Settings } from '../shared/types.js';
+import { addBookmark, forHost, normalizePath, removeForHost, reorder } from './bookmarks.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
 
@@ -175,7 +176,87 @@ export function createApiRouter(context: ServerContext): Router {
       fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
       return;
     }
-    context.db.hosts.splice(index, 1);
+    const [removed] = context.db.hosts.splice(index, 1);
+    // 迷子のブックマークを残さない
+    if (removed) {
+      context.db.bookmarks = removeForHost(context.db.bookmarks, removed.id);
+    }
+    context.save();
+    res.status(204).end();
+  });
+
+  router.get('/bookmarks', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const bookmarks: Bookmark[] = hostId
+      ? forHost(context.db.bookmarks, hostId)
+      : [...context.db.bookmarks].sort((a, b) => a.order - b.order);
+    res.json({ bookmarks });
+  });
+
+  router.post('/bookmarks', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const hostId = text(body.hostId);
+    const path = text(body.path);
+    if (!hostId || !path) {
+      fail(res, 400, 'invalid_bookmark', '接続先とパスを指定してください。');
+      return;
+    }
+    if (!context.db.hosts.some((host) => host.id === hostId)) {
+      fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
+      return;
+    }
+    if (!normalizePath(path).startsWith('/') && !normalizePath(path).startsWith('~')) {
+      fail(res, 400, 'invalid_bookmark', 'パスは / または ~ から始めてください。');
+      return;
+    }
+
+    const label = text(body.label);
+    const result = addBookmark(context.db.bookmarks, {
+      hostId,
+      path,
+      ...(label ? { label } : {}),
+    });
+    context.db.bookmarks = result.bookmarks;
+    context.save();
+    res.status(201).json({ bookmark: result.bookmark });
+  });
+
+  router.patch('/bookmarks/:id', (req, res) => {
+    const bookmark = context.db.bookmarks.find((entry) => entry.id === req.params.id);
+    if (!bookmark) {
+      fail(res, 404, 'bookmark_not_found', '指定されたブックマークが見つかりません。');
+      return;
+    }
+    const label = text((req.body as Record<string, unknown>).label);
+    if (label) {
+      bookmark.label = label;
+    }
+    context.save();
+    res.json({ bookmark });
+  });
+
+  router.post('/bookmarks/reorder', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const hostId = text(body.hostId);
+    const ids = Array.isArray(body.ids)
+      ? (body.ids as unknown[]).filter((id): id is string => typeof id === 'string')
+      : undefined;
+    if (!hostId || !ids) {
+      fail(res, 400, 'invalid_bookmark', '接続先と並び順を指定してください。');
+      return;
+    }
+    context.db.bookmarks = reorder(context.db.bookmarks, hostId, ids);
+    context.save();
+    res.json({ bookmarks: forHost(context.db.bookmarks, hostId) });
+  });
+
+  router.delete('/bookmarks/:id', (req, res) => {
+    const index = context.db.bookmarks.findIndex((entry) => entry.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'bookmark_not_found', '指定されたブックマークが見つかりません。');
+      return;
+    }
+    context.db.bookmarks.splice(index, 1);
     context.save();
     res.status(204).end();
   });
