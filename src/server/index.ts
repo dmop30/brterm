@@ -11,7 +11,9 @@ import type { HealthResponse } from '../shared/types.js';
 import { createApiRouter } from './api.js';
 import { createContext, type ServerContext } from './context.js';
 import { dataDir } from './paths.js';
+import { SessionManager } from './ssh.js';
 import { allowedOrigins, isAllowedOrigin, tokenFromRequest, tokenMatches } from './token.js';
+import { attachWebSocketServer } from './ws.js';
 
 const VERSION = '0.1.0';
 
@@ -96,7 +98,16 @@ if (isMain()) {
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
 
-  createServer(app).listen(port, host, () => {
+  const httpServer = createServer(app);
+  // 端末の入出力は WebSocket で中継する。セッションはこのプロセスが持つ。
+  attachWebSocketServer(httpServer, {
+    context,
+    manager: new SessionManager(),
+    devMode,
+    origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
+  });
+
+  httpServer.listen(port, host, () => {
     // 秘密情報は出さない。ただし**トークンは起動した本人にだけ**必要なので、
     // 自分の端末に出す URL には含める(これが無いと画面を開けない)。
     console.error(`brterm ${VERSION} listening on http://${host}:${port}`);
