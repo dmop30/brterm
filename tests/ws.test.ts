@@ -66,6 +66,8 @@ interface Harness {
   token: string;
   hostId: string;
   manager: SessionManager;
+  /** 履歴や設定を直接確かめるため */
+  context: ReturnType<typeof createContext>;
 }
 
 async function startHarness(options: {
@@ -114,7 +116,13 @@ async function startHarness(options: {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address() as AddressInfo;
-  return { url: `ws://127.0.0.1:${port}/ws`, token: context.token, hostId: host.id, manager };
+  return {
+    url: `ws://127.0.0.1:${port}/ws`,
+    token: context.token,
+    hostId: host.id,
+    manager,
+    context,
+  };
 }
 
 function connectSocket(harness: Harness, withToken = true): WebSocket {
@@ -302,4 +310,151 @@ test('形式が違う要求は、理由を返して落ちない', async () => {
   socket.send('これは JSON ではない');
   const error = await waitFor(socket, 'error');
   assert.equal(error.code, 'bad_message');
+});
+
+/** 受け取った出力をためる。改行を握れているかの確認に使う。 */
+function collect(socket: WebSocket): { text: () => string } {
+  let buffer = '';
+  socket.on('message', (raw: unknown) => {
+    const message = JSON.parse(String(raw)) as ServerMessage;
+    if (message.type === 'data') {
+      buffer += message.data;
+    }
+  });
+  return { text: () => buffer };
+}
+
+/** 相手の応答を待つ猶予。握った改行が漏れていないかは「来ないこと」で確かめる。 */
+function settle(): Promise<void> {
+  return new Promise((done) => setTimeout(done, 300));
+}
+
+test('危険なコマンドは改行を握って確認を出す', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  const output = collect(socket);
+
+  const waiting = waitFor(socket, 'confirm');
+  say(socket, { type: 'input', data: 'rm -rf /etc/nginx\r' });
+  const confirm = await waiting;
+
+  assert.equal(confirm.command, 'rm -rf /etc/nginx');
+  // 対象（ホスト名とパス）と理由が文言に入っていること（要件定義 12 章 5）
+  assert.match(confirm.message, /127\.0\.0\.1/);
+  assert.match(confirm.message, /\/etc/);
+  assert.match(confirm.reason, /消します/);
+
+  await settle();
+  // 改行は送っていないので、折り返しにも現れない
+  assert.equal(output.text().includes('rm -rf /etc/nginx\r'), false, '改行が漏れた');
+  assert.equal(harness.context.db.history.length, 0, '実行前に履歴へ入った');
+});
+
+test('受け入れたら実行し、履歴に残す', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  const output = collect(socket);
+
+  const waiting = waitFor(socket, 'confirm');
+  say(socket, { type: 'input', data: 'rm -rf /etc/nginx\r' });
+  await waiting;
+  say(socket, { type: 'confirm-decision', accept: true });
+  await settle();
+
+  assert.ok(output.text().includes('rm -rf /etc/nginx\r'), '改行が送られていない');
+  assert.deepEqual(
+    harness.context.db.history.map((entry) => entry.command),
+    ['rm -rf /etc/nginx'],
+  );
+});
+
+test('断ったら実行せず、履歴にも残さない', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  const output = collect(socket);
+
+  const waiting = waitFor(socket, 'confirm');
+  say(socket, { type: 'input', data: 'rm -rf /etc/nginx\r' });
+  await waiting;
+  say(socket, { type: 'confirm-decision', accept: false });
+  await settle();
+
+  assert.equal(output.text().includes('rm -rf /etc/nginx\r'), false, '実行してしまった');
+  assert.equal(harness.context.db.history.length, 0);
+});
+
+test('確認待ちのあいだに打った分は、受け入れた後に同じ順で流す', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  const output = collect(socket);
+
+  const waiting = waitFor(socket, 'confirm');
+  // 改行より後ろ（uptime）も一緒に届くが、先に流してはいけない
+  say(socket, { type: 'input', data: 'rm -rf /etc/nginx\ruptime\r' });
+  await waiting;
+  await settle();
+  assert.equal(output.text().includes('uptime'), false, '確認前に後続を流した');
+
+  say(socket, { type: 'confirm-decision', accept: true });
+  await settle();
+  assert.deepEqual(
+    harness.context.db.history.map((entry) => entry.command),
+    ['rm -rf /etc/nginx', 'uptime'],
+  );
+});
+
+test('普通のコマンドは止めずに実行し、履歴に残す', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+
+  say(socket, { type: 'input', data: 'systemctl status nginx\r' });
+  await settle();
+  assert.deepEqual(
+    harness.context.db.history.map((entry) => entry.command),
+    ['systemctl status nginx'],
+  );
+});
+
+test('確認を切っていれば止めない', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  harness.context.db.settings.confirmDangerousCommands = false;
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+
+  say(socket, { type: 'input', data: 'reboot\r' });
+  await settle();
+  assert.deepEqual(
+    harness.context.db.history.map((entry) => entry.command),
+    ['reboot'],
+  );
+});
+
+test('保持件数が 0 なら履歴を残さない', async () => {
+  const harness = await startHarness({ sshPort: await startSsh() });
+  harness.context.db.settings.historyLimit = 0;
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+
+  say(socket, { type: 'input', data: 'uptime\r' });
+  await settle();
+  assert.equal(harness.context.db.history.length, 0);
+});
+
+test('パスワードを尋ねられている最中の入力は履歴に残さない', async () => {
+  const harness = await startHarness({
+    sshPort: await startSsh({ greeting: Buffer.from('[sudo] password for ops: ', 'utf8') }),
+  });
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  // 合図（プロンプト）が届いてから打つ
+  await waitFor(socket, 'data', (message) => message.data.includes('password'));
+
+  say(socket, { type: 'input', data: 'himitsu\r' });
+  await settle();
+  assert.equal(harness.context.db.history.length, 0, 'パスワードが履歴に入った');
 });

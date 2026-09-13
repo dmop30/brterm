@@ -10,9 +10,11 @@ import { randomUUID } from 'node:crypto';
 
 import express, { type Request, type Response, type Router } from 'express';
 
-import type { Host, Profile, Settings } from '../shared/types.js';
+import type { Host, Procedure, ProcedureStep, Profile, Settings } from '../shared/types.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
+import { listHistory, trimHistory } from './history.js';
+import { makeProcedure, makeStep, stepsFromHistory, toMarkdown } from './procedures.js';
 
 /** 画面に返す接続先。パスワードは含めない。 */
 export interface HostView extends Omit<Host, 'password' | 'passphrase'> {
@@ -230,9 +232,157 @@ export function createApiRouter(context: ServerContext): Router {
     if (typeof body.historyLimit === 'number' && Number.isInteger(body.historyLimit)) {
       // 0 は「残さない」。上限は青天井にしない(ファイルが太る)。
       settings.historyLimit = Math.min(Math.max(body.historyLimit, 0), 100000);
+      // 上限を下げたら、その場で溢れた分を落とす(次の実行まで残さない)
+      trimHistory(context.db);
     }
     context.save();
     res.json({ settings });
+  });
+
+  // ---- 履歴 ----------------------------------------------------------------
+
+  router.get('/history', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const raw = Number(req.query.limit);
+    const limit = Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+    res.json({
+      history: listHistory(context.db, {
+        ...(hostId ? { hostId } : {}),
+        ...(limit === undefined ? {} : { limit }),
+      }),
+    });
+  });
+
+  /** 履歴の削除。接続先を指定すればその分だけ消す。 */
+  router.delete('/history', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const before = context.db.history.length;
+    context.db.history = hostId
+      ? context.db.history.filter((entry) => entry.hostId !== hostId)
+      : [];
+    context.save();
+    res.json({ removed: before - context.db.history.length });
+  });
+
+  // ---- 手順 ----------------------------------------------------------------
+
+  function findProcedure(id: string): Procedure | undefined {
+    return context.db.procedures.find((procedure) => procedure.id === id);
+  }
+
+  /** 本文から手順のステップを組み立てる。履歴 id を渡す形も受ける。 */
+  function stepsFrom(body: Record<string, unknown>): ProcedureStep[] {
+    if (Array.isArray(body.historyIds)) {
+      const ids = new Set(body.historyIds.map(String));
+      // 履歴に並んでいる順で残す(選んだ順ではなく、実行した順)
+      return stepsFromHistory(context.db.history.filter((entry) => ids.has(entry.id)));
+    }
+    if (!Array.isArray(body.steps)) {
+      return [];
+    }
+    return body.steps
+      .map((item) => item as Record<string, unknown>)
+      .map((item) => ({
+        command: text(item.command) ?? '',
+        ...(typeof item.output === 'string' ? { output: item.output } : {}),
+        ...(typeof item.exitCode === 'number' ? { exitCode: item.exitCode } : {}),
+        ...(text(item.note) ? { note: text(item.note) as string } : {}),
+      }))
+      .filter((item) => item.command !== '')
+      .map(makeStep);
+  }
+
+  router.get('/procedures', (_req, res) => {
+    res.json({ procedures: context.db.procedures });
+  });
+
+  router.post('/procedures', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const title = text(body.title);
+    if (!title) {
+      fail(res, 400, 'invalid_procedure', '手順の題名を入力してください。');
+      return;
+    }
+    const hostId = text(body.hostId);
+    const procedure = makeProcedure({
+      title,
+      ...(hostId ? { hostId } : {}),
+      steps: stepsFrom(body),
+    });
+    context.db.procedures.push(procedure);
+    context.save();
+    res.status(201).json({ procedure });
+  });
+
+  router.get('/procedures/:id', (req, res) => {
+    const procedure = findProcedure(req.params.id);
+    if (!procedure) {
+      fail(res, 404, 'procedure_not_found', 'その手順は見つかりません。');
+      return;
+    }
+    res.json({ procedure });
+  });
+
+  router.patch('/procedures/:id', (req, res) => {
+    const procedure = findProcedure(req.params.id);
+    if (!procedure) {
+      fail(res, 404, 'procedure_not_found', 'その手順は見つかりません。');
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const title = text(body.title);
+    if (title) {
+      procedure.title = title;
+    }
+    // ステップは**渡されたときだけ**入れ替える(空配列で消せるようにする)
+    if (Array.isArray(body.steps) || Array.isArray(body.historyIds)) {
+      procedure.steps = stepsFrom(body);
+    }
+    procedure.updatedAt = new Date().toISOString();
+    context.save();
+    res.json({ procedure });
+  });
+
+  /** ステップを末尾に足す。端末や履歴から 1 件ずつ積むときに使う。 */
+  router.post('/procedures/:id/steps', (req, res) => {
+    const procedure = findProcedure(req.params.id);
+    if (!procedure) {
+      fail(res, 404, 'procedure_not_found', 'その手順は見つかりません。');
+      return;
+    }
+    const steps = stepsFrom(req.body as Record<string, unknown>);
+    if (steps.length === 0) {
+      fail(res, 400, 'invalid_step', '足すコマンドがありません。');
+      return;
+    }
+    procedure.steps.push(...steps);
+    procedure.updatedAt = new Date().toISOString();
+    context.save();
+    res.status(201).json({ procedure });
+  });
+
+  router.delete('/procedures/:id', (req, res) => {
+    const index = context.db.procedures.findIndex((procedure) => procedure.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'procedure_not_found', 'その手順は見つかりません。');
+      return;
+    }
+    context.db.procedures.splice(index, 1);
+    context.save();
+    res.json({ removed: true });
+  });
+
+  /** Markdown 書き出し。そのまま Wiki へ貼れる形で返す。 */
+  router.get('/procedures/:id/markdown', (req, res) => {
+    const procedure = findProcedure(req.params.id);
+    if (!procedure) {
+      fail(res, 404, 'procedure_not_found', 'その手順は見つかりません。');
+      return;
+    }
+    const host = context.db.hosts.find((entry) => entry.id === procedure.hostId);
+    res
+      .type('text/markdown; charset=utf-8')
+      .send(toMarkdown(procedure, host ? { hostLabel: host.label } : {}));
   });
 
   return router;
