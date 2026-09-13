@@ -7,13 +7,29 @@
  * - 破壊的な操作(削除)は、対象が存在しないときも理由を明示する
  */
 import { randomUUID } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 import express, { type Request, type Response, type Router } from 'express';
 
 import type { Host, Procedure, ProcedureStep, Profile, Settings } from '../shared/types.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
+import { isAppError } from './errors.js';
 import { listHistory, trimHistory } from './history.js';
+import {
+  generateKey,
+  installCommand,
+  parseSshConfig,
+  readKeyFile,
+  readSshConfig,
+  upsertSshConfigHost,
+  writeKey,
+  writeSshConfig,
+  type KeyType,
+} from './keys.js';
+import { keysDir as defaultKeysDir, sshConfigPath as defaultSshConfigPath } from './paths.js';
+import type { SessionManager } from './ssh.js';
 import { makeProcedure, makeStep, stepsFromHistory, toMarkdown } from './procedures.js';
 
 /** 画面に返す接続先。パスワードは含めない。 */
@@ -42,8 +58,19 @@ function port(value: unknown): number | undefined {
   return value;
 }
 
-export function createApiRouter(context: ServerContext): Router {
+export interface ApiOptions {
+  /** 鍵の配置に使う。開いているセッションを通して `authorized_keys` を書く */
+  manager?: SessionManager;
+  /** 鍵の置き場。検証で差し替えるため */
+  keysDir?: string;
+  /** `~/.ssh/config` の場所。検証で差し替えるため */
+  sshConfigPath?: string;
+}
+
+export function createApiRouter(context: ServerContext, options: ApiOptions = {}): Router {
   const router = express.Router();
+  const keysDir = options.keysDir ?? defaultKeysDir();
+  const sshConfigPath = options.sshConfigPath ?? defaultSshConfigPath();
 
   router.get('/hosts', (_req, res) => {
     res.json({ hosts: context.db.hosts.map(toHostView) });
@@ -461,6 +488,141 @@ export function createApiRouter(context: ServerContext): Router {
     res
       .type('text/markdown; charset=utf-8')
       .send(toMarkdown(procedure, host ? { hostLabel: host.label } : {}));
+  });
+
+  // ---- SSH 鍵 --------------------------------------------------------------
+
+  /** 鍵置き場にある鍵。**秘密鍵の中身は返さない**（場所だけ）。 */
+  router.get('/keys', (_req, res) => {
+    if (!existsSync(keysDir)) {
+      res.json({ keys: [], dir: keysDir });
+      return;
+    }
+    const keys = readdirSync(keysDir)
+      .filter((name) => name.endsWith('.pub'))
+      .map((name) => readKeyFile(join(keysDir, name)));
+    res.json({ keys, dir: keysDir });
+  });
+
+  router.post('/keys', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const name = text(body.name);
+    if (!name) {
+      fail(res, 400, 'invalid_key_name', '鍵の名前を入力してください。');
+      return;
+    }
+    const type: KeyType = body.type === 'rsa' ? 'rsa' : 'ed25519';
+    try {
+      const generated = generateKey({
+        type,
+        ...(typeof body.bits === 'number' ? { bits: body.bits } : {}),
+        ...(text(body.comment) ? { comment: text(body.comment) as string } : {}),
+        ...(text(body.passphrase) ? { passphrase: text(body.passphrase) as string } : {}),
+      });
+      const written = writeKey(keysDir, name, generated);
+      // 秘密鍵の中身は返さない。場所と公開鍵と指紋だけ渡す
+      res.status(201).json({
+        key: {
+          name,
+          type: written.type,
+          privateKeyPath: written.privateKeyPath,
+          publicKeyPath: written.publicKeyPath,
+          publicKey: written.publicKey,
+          fingerprint: written.fingerprint,
+        },
+      });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, error.code === 'key_exists' ? 409 : 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * 公開鍵を接続先の `authorized_keys` へ置く。
+   *
+   * **開いているセッションを通して行う。** ここで新しく繋ぐと、ホスト鍵の確認を
+   * 画面に出せない（未確認の鍵を黙って受け入れることになる）ため、安全側に倒している。
+   */
+  router.post('/keys/:name/install', async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const hostId = text(body.hostId);
+    if (!hostId) {
+      fail(res, 400, 'invalid_host', '置き先の接続先を指定してください。');
+      return;
+    }
+    const host = context.db.hosts.find((entry) => entry.id === hostId);
+    if (!host) {
+      fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
+      return;
+    }
+    const publicKeyPath = join(keysDir, `${req.params.name}.pub`);
+    if (!existsSync(publicKeyPath)) {
+      fail(res, 404, 'key_not_found', 'その鍵はありません。');
+      return;
+    }
+    const session = options.manager?.list().find((item) => item.hostId === hostId);
+    if (!session || session.isClosed) {
+      fail(
+        res,
+        409,
+        'ssh_no_session',
+        `${host.label} に繋がっていません。先に端末でこの接続先へ繋いでください。`,
+      );
+      return;
+    }
+
+    try {
+      const key = readKeyFile(publicKeyPath);
+      const result = await session.exec(installCommand(key.publicKey));
+      if (result.code !== 0) {
+        fail(
+          res,
+          502,
+          'key_install_failed',
+          `${host.label} に鍵を置けませんでした。${result.stderr.trim()}`,
+        );
+        return;
+      }
+      res.json({ installed: true, fingerprint: key.fingerprint });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
+  });
+
+  // ---- ~/.ssh/config -------------------------------------------------------
+
+  router.get('/ssh-config', (_req, res) => {
+    const text_ = readSshConfig(sshConfigPath);
+    res.json({ path: sshConfigPath, hosts: parseSshConfig(text_), text: text_ });
+  });
+
+  /** Host の記述を差し替える。手で書いた記述は残す。 */
+  router.put('/ssh-config/hosts/:host', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    try {
+      const updated = upsertSshConfigHost(readSshConfig(sshConfigPath), {
+        host: req.params.host,
+        ...(text(body.hostName) ? { hostName: text(body.hostName) as string } : {}),
+        ...(text(body.user) ? { user: text(body.user) as string } : {}),
+        ...(port(body.port) === undefined ? {} : { port: port(body.port) as number }),
+        ...(text(body.identityFile) ? { identityFile: text(body.identityFile) as string } : {}),
+      });
+      writeSshConfig(sshConfigPath, updated);
+      res.json({ path: sshConfigPath, hosts: parseSshConfig(updated) });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
   });
 
   return router;

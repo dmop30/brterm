@@ -19,6 +19,11 @@ const VERSION = '0.1.0';
 
 export interface AppOptions {
   context: ServerContext;
+  /** 端末セッションの台帳。鍵の配置で、開いているセッションを使う */
+  manager?: SessionManager;
+  /** 鍵の置き場と `~/.ssh/config` の場所。検証で差し替えるため */
+  keysDir?: string;
+  sshConfigPath?: string;
   /** 開発時(`npm run dev`)はトークン認証を省略する(要件定義 2 章)。 */
   devMode?: boolean;
   /** 許す Origin。省略時は待ち受け先から作る。 */
@@ -70,7 +75,14 @@ export function createApp(options: AppOptions): express.Express {
     next();
   });
 
-  app.use('/api', createApiRouter(context));
+  app.use(
+    '/api',
+    createApiRouter(context, {
+      ...(options.manager ? { manager: options.manager } : {}),
+      ...(options.keysDir ? { keysDir: options.keysDir } : {}),
+      ...(options.sshConfigPath ? { sshConfigPath: options.sshConfigPath } : {}),
+    }),
+  );
 
   const dir = clientDir();
   if (existsSync(join(dir, 'index.html'))) {
@@ -92,8 +104,11 @@ if (isMain()) {
   const port = Number(process.env.BRTERM_PORT ?? SERVER_PORT);
   const host = process.env.BRTERM_HOST ?? BIND_ADDRESS;
   const context = createContext();
+  // API(鍵の配置)と WebSocket で**同じ台帳**を見る
+  const manager = new SessionManager();
   const app = createApp({
     context,
+    manager,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
@@ -102,7 +117,7 @@ if (isMain()) {
   // 端末の入出力は WebSocket で中継する。セッションはこのプロセスが持つ。
   attachWebSocketServer(httpServer, {
     context,
-    manager: new SessionManager(),
+    manager,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });

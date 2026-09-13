@@ -30,6 +30,23 @@ export function tokenPath(env: NodeJS.ProcessEnv = process.env): string {
   return dataPath('token', env);
 }
 
+/** brterm が作った SSH 鍵の置き場。既定は `~/.brterm/keys`。 */
+export function keysDir(env: NodeJS.ProcessEnv = process.env): string {
+  return dataPath('keys', env);
+}
+
+/**
+ * `~/.ssh/config` の場所。
+ * `BRTERM_SSH_CONFIG` で差し替えられるようにしてあるのは、検証で本物を触らないため。
+ */
+export function sshConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.BRTERM_SSH_CONFIG;
+  if (override && override.length > 0) {
+    return override;
+  }
+  return join(homedir(), '.ssh', 'config');
+}
+
 /** 予定実行のログ置き場。機密は書かない。 */
 export function logsDir(env: NodeJS.ProcessEnv = process.env): string {
   return dataPath('logs', env);

@@ -164,6 +164,14 @@ export class Session {
     this.stream.end();
     this.client.end();
   }
+
+  /**
+   * シェルとは別にコマンドを実行する(鍵の配置・予定実行で使う)。
+   * `client` を外へ出さずに済ませるため、口はここに置く。
+   */
+  exec(command: string): Promise<CommandResult> {
+    return execCommand({ client: this.client }, command);
+  }
 }
 
 /** ssh2 の誤りを、利用者に見せられる日本語へ分ける。 */
