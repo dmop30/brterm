@@ -1,0 +1,62 @@
+# 依存の自動更新。
+# 要点は「更新しない」ことではなく「即座には取り込まない」こと。
+# cooldown で公開直後の版を避け、侵害された版が撤回される時間差を作る。
+version: 2
+
+updates:
+  # GitHub Actions。SHA pin のまま追随し、コメントのバージョン表記も更新される。
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'github-actions']
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      actions:
+        patterns: ['*']
+
+  # npm 依存
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:00'
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'npm']
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      # まとめて1PRにする。個別PRが増えるとレビューが形骸化する。
+      dev-tools:
+        patterns:
+          - 'eslint*'
+          - '@eslint/*'
+          - 'typescript*'
+          - 'prettier'
+          - '@types/*'
+          - 'vite'
+          - '@vitejs/*'
+          - 'tsx'
+          - 'concurrently'
+          - 'globals'
+        dependency-type: development
+      runtime:
+        patterns: ['*']
+        dependency-type: production
