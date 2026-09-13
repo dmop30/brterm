@@ -19,3 +19,23 @@ export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
 export function dataPath(name: string, env: NodeJS.ProcessEnv = process.env): string {
   return join(dataDir(env), name);
 }
+
+/** ローカル鍵の場所(`local` モードのみ。要件定義 8 章)。 */
+export function keyPath(env: NodeJS.ProcessEnv = process.env): string {
+  return dataPath('master.key', env);
+}
+
+/** 画面アクセス用トークンの場所。 */
+export function tokenPath(env: NodeJS.ProcessEnv = process.env): string {
+  return dataPath('token', env);
+}
+
+/** 予定実行のログ置き場。機密は書かない。 */
+export function logsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return dataPath('logs', env);
+}
+
+/** 再開用のセッションメタ置き場(P4 で使う)。 */
+export function sessionsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return dataPath('sessions', env);
+}
