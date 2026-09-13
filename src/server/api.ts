@@ -92,6 +92,10 @@ export function createApiRouter(context: ServerContext): Router {
     }
     const profileId = text(body.profileId);
     if (profileId) {
+      if (!context.db.profiles.some((profile) => profile.id === profileId)) {
+        fail(res, 400, 'profile_not_found', '指定されたプロファイルがありません。');
+        return;
+      }
       host.profileId = profileId;
     }
 
@@ -165,6 +169,19 @@ export function createApiRouter(context: ServerContext): Router {
         delete host.privateKeyPath;
       }
     }
+    // 空文字を渡したら既定のプロファイルへ戻す
+    if (typeof body.profileId === 'string') {
+      const profileId = text(body.profileId);
+      if (profileId) {
+        if (!context.db.profiles.some((profile) => profile.id === profileId)) {
+          fail(res, 400, 'profile_not_found', '指定されたプロファイルがありません。');
+          return;
+        }
+        host.profileId = profileId;
+      } else {
+        delete host.profileId;
+      }
+    }
 
     host.updatedAt = new Date().toISOString();
     context.save();
@@ -211,6 +228,67 @@ export function createApiRouter(context: ServerContext): Router {
     context.db.profiles.push(profile);
     context.save();
     res.status(201).json({ profile });
+  });
+
+  router.patch('/profiles/:id', (req, res) => {
+    const profile = context.db.profiles.find((entry) => entry.id === req.params.id);
+    if (!profile) {
+      fail(res, 404, 'profile_not_found', '指定されたプロファイルがありません。');
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    if (label) {
+      profile.label = label;
+    }
+    if (body.encoding === 'utf-8' || body.encoding === 'shift_jis' || body.encoding === 'euc-jp') {
+      profile.encoding = body.encoding;
+    }
+    const term = text(body.term);
+    if (term) {
+      profile.term = term;
+    }
+    // env と onConnect は**渡されたときだけ**丸ごと入れ替える(空で消せるように)
+    if (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env)) {
+      profile.env = Object.fromEntries(
+        Object.entries(body.env as Record<string, unknown>)
+          .filter(([, value]) => typeof value === 'string')
+          .map(([name, value]) => [name, value as string]),
+      );
+    }
+    if (Array.isArray(body.onConnect)) {
+      profile.onConnect = body.onConnect
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter((item) => item !== '');
+    }
+    context.save();
+    res.json({ profile });
+  });
+
+  router.delete('/profiles/:id', (req, res) => {
+    // 既定は消させない。消えると、紐付いていない接続先の拠り所が無くなる
+    if (req.params.id === 'default') {
+      fail(res, 400, 'profile_protected', '既定のプロファイルは消せません。');
+      return;
+    }
+    const index = context.db.profiles.findIndex((entry) => entry.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'profile_not_found', '指定されたプロファイルがありません。');
+      return;
+    }
+    context.db.profiles.splice(index, 1);
+    // 迷子の参照を残さない。使っていた接続先は既定へ戻す
+    let detached = 0;
+    for (const host of context.db.hosts) {
+      if (host.profileId === req.params.id) {
+        delete host.profileId;
+        host.updatedAt = new Date().toISOString();
+        detached += 1;
+      }
+    }
+    context.save();
+    res.json({ removed: true, detached });
   });
 
   router.get('/settings', (_req, res) => {

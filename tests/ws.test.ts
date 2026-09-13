@@ -458,3 +458,100 @@ test('パスワードを尋ねられている最中の入力は履歴に残さ�
   await settle();
   assert.equal(harness.context.db.history.length, 0, 'パスワードが履歴に入った');
 });
+
+/** 受け取った環境変数と打鍵を控える試験用 SSH サーバ。プロファイルの効きを見る。 */
+interface Recorded {
+  port: number;
+  env: Record<string, string>;
+  input: () => string;
+}
+
+async function startRecordingSsh(): Promise<Recorded> {
+  const env: Record<string, string> = {};
+  let input = '';
+  const server = new Server({ hostKeys: [keyPair.private] }, (client: Connection) => {
+    client.on('authentication', (ctx) => {
+      if (ctx.method === 'password') {
+        ctx.accept();
+        return;
+      }
+      ctx.reject(['password']);
+    });
+    client.on('ready', () => {
+      client.on('session', (accept) => {
+        const session = accept();
+        session.on('env', (envAccept, _reject, info) => {
+          // ssh2 の env 要求は `val`（`value` ではない）
+          env[info.key] = info.val;
+          envAccept?.();
+        });
+        session.once('pty', (ptyAccept) => ptyAccept?.());
+        session.once('shell', (shellAccept) => {
+          const stream = shellAccept();
+          stream.write(Buffer.from('$ ', 'utf8'));
+          stream.on('data', (chunk: Buffer) => {
+            input += chunk.toString('utf8');
+            stream.write(chunk);
+          });
+        });
+      });
+    });
+    client.on('error', () => {
+      /* 試験中の切断は無視 */
+    });
+  });
+  sshServers.push(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return {
+    port: (server.address() as AddressInfo).port,
+    env,
+    input: () => input,
+  };
+}
+
+test('プロファイルの環境変数が接続先へ渡る', async () => {
+  const ssh = await startRecordingSsh();
+  const harness = await startHarness({ sshPort: ssh.port });
+  harness.context.db.profiles.push({
+    id: 'p1',
+    label: '検証用',
+    encoding: 'utf-8',
+    term: 'xterm',
+    env: { LANG: 'ja_JP.UTF-8' },
+    onConnect: [],
+  });
+  const host = harness.context.db.hosts[0];
+  assert.ok(host);
+  host.profileId = 'p1';
+
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  await settle();
+  assert.equal(ssh.env.LANG, 'ja_JP.UTF-8');
+});
+
+test('接続時コマンドは接続直後に流し、履歴には残さない', async () => {
+  const ssh = await startRecordingSsh();
+  const harness = await startHarness({ sshPort: ssh.port });
+  harness.context.db.profiles.push({
+    id: 'p2',
+    label: '検証用',
+    encoding: 'utf-8',
+    term: 'xterm-256color',
+    env: {},
+    onConnect: ['export LANG=ja_JP.UTF-8', 'cd /var/log'],
+  });
+  const host = harness.context.db.hosts[0];
+  assert.ok(host);
+  host.profileId = 'p2';
+
+  const socket = connectSocket(harness);
+  await openSession(harness, socket);
+  await settle();
+
+  assert.ok(ssh.input().includes('export LANG=ja_JP.UTF-8\r'), '接続時コマンドが流れていない');
+  assert.ok(ssh.input().includes('cd /var/log\r'), '2 つ目が流れていない');
+  // 利用者が打ったものではないので残さない
+  assert.equal(harness.context.db.history.length, 0);
+});

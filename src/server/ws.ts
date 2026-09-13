@@ -172,6 +172,11 @@ export function attachWebSocketServer(
 
       manager.add(session);
       bind(session, session.snapshot());
+
+      // 接続時コマンドは**履歴に残さない**(利用者が打ったものではない。要件定義 3 章)
+      for (const command of profile.onConnect) {
+        session.write(`${command}\r`);
+      }
     };
 
     /** 確定した行を実行する。改行はここでだけ送る。 */
