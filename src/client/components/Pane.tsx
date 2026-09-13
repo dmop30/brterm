@@ -1,8 +1,12 @@
-import type { Tab } from '../lib/tabs';
+import type { ConnectionState, Tab } from '../lib/tabs';
+import { TerminalTab } from './TerminalTab';
 
 interface Props {
   tab?: Tab;
+  token?: string;
   onAddTerminal?: () => void;
+  onSession?: (tabId: string, sessionId: string) => void;
+  onConnectionChange?: (tabId: string, state: ConnectionState) => void;
 }
 
 /** 既定のキー。ブラウザが握っている組み合わせ（Ctrl+T / Ctrl+W など）は避ける。 */
@@ -22,7 +26,7 @@ const SHORTCUTS: [string, string][] = [
  * タブの中身。端末(#12)とエディタ(#20)で置き換える。
  * いまは**この画面で何ができるか**とショートカットを出しておく。
  */
-export function Pane({ tab, onAddTerminal }: Props) {
+export function Pane({ tab, token, onAddTerminal, onSession, onConnectionChange }: Props) {
   if (!tab) {
     return (
       <div className="pane pane--empty">
@@ -44,6 +48,19 @@ export function Pane({ tab, onAddTerminal }: Props) {
           </tbody>
         </table>
       </div>
+    );
+  }
+
+  if (tab.kind === 'terminal' && tab.hostId) {
+    return (
+      <TerminalTab
+        key={tab.id}
+        hostId={tab.hostId}
+        {...(tab.sessionId ? { sessionId: tab.sessionId } : {})}
+        {...(token ? { token } : {})}
+        onSession={(sessionId) => onSession?.(tab.id, sessionId)}
+        onConnectionChange={(state) => onConnectionChange?.(tab.id, state)}
+      />
     );
   }
 

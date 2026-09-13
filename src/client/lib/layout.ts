@@ -75,6 +75,20 @@ export function updateGroup(
   };
 }
 
+/** どの面にあるタブでも、id で探して差し替える。 */
+export function patchTab(layout: Layout, tabId: string, patch: Partial<Tab>): Layout {
+  return {
+    ...layout,
+    groups: layout.groups.map((group) => ({
+      ...group,
+      tabs: {
+        ...group.tabs,
+        tabs: group.tabs.tabs.map((tab) => (tab.id === tabId ? { ...tab, ...patch } : tab)),
+      },
+    })),
+  };
+}
+
 export function updateActiveGroup(layout: Layout, update: (tabs: TabsState) => TabsState): Layout {
   return updateGroup(layout, layout.activeGroupId, update);
 }

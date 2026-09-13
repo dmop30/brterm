@@ -7,12 +7,15 @@ import {
   type PaneGroup,
   type SplitDirection,
 } from '../lib/layout';
-import { activeTab } from '../lib/tabs';
+import { activeTab, type ConnectionState } from '../lib/tabs';
 import { Pane } from './Pane';
 import { TabBar } from './TabBar';
 
 interface Props {
   layout: Layout;
+  token?: string;
+  onSession: (tabId: string, sessionId: string) => void;
+  onConnectionChange: (tabId: string, state: ConnectionState) => void;
   onFocusGroup: (groupId: string) => void;
   onActivateTab: (groupId: string, tabId: string) => void;
   onCloseTab: (groupId: string, tabId: string) => void;
@@ -30,6 +33,9 @@ interface Props {
  */
 export function Workspace({
   layout,
+  token,
+  onSession,
+  onConnectionChange,
   onFocusGroup,
   onActivateTab,
   onCloseTab,
@@ -124,7 +130,13 @@ export function Workspace({
               onSplitColumn={() => onSplit(group.id, 'column')}
               {...(layout.groups.length > 1 ? { onCloseGroup: () => onCloseGroup(group.id) } : {})}
             />
-            <Pane tab={activeTab(group.tabs)} onAddTerminal={() => onAddTerminal(group.id)} />
+            <Pane
+              tab={activeTab(group.tabs)}
+              {...(token ? { token } : {})}
+              onAddTerminal={() => onAddTerminal(group.id)}
+              onSession={onSession}
+              onConnectionChange={onConnectionChange}
+            />
           </section>
         </div>
       ))}

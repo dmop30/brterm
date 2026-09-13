@@ -23,6 +23,10 @@ export interface Tab {
   dirty?: boolean;
   /** 端末タブだけが持つ */
   connection?: ConnectionState;
+  /** 端末タブの繋ぎ先 */
+  hostId?: string;
+  /** サーバ側のセッション。繋ぎ直しに使う。 */
+  sessionId?: string;
   /** 書き込み権限が無いファイル */
   readOnly?: boolean;
 }

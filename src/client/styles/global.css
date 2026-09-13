@@ -466,3 +466,166 @@ kbd,
     --side-width: 180px;
   }
 }
+
+/* ───────── 端末 ───────── */
+.terminal {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.terminal__screen {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  padding: var(--space-2);
+}
+/*
+ * xterm を器から切り離す。
+ * 器の高さに合わせて行数を決める(fit)ので、**xterm 自身の高さが器を押し広げると
+ * 行数が増え続ける**(実際にこの帰還ループを踏んだ)。
+ */
+.terminal__screen .xterm {
+  position: absolute;
+  inset: var(--space-2);
+}
+.terminal__error {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--line);
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+/* ───────── 確認ダイアログ ───────── */
+.scrim {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+  z-index: 10;
+}
+.dialog {
+  width: min(452px, calc(100% - var(--space-4)));
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--warn);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 44px rgb(0 0 0 / 0.4);
+}
+.dialog h4 {
+  margin: 0 0 var(--space-2);
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--warn);
+}
+.dialog p {
+  margin: 0 0 var(--space-2);
+  font-size: 12.5px;
+}
+.dialog__target {
+  margin-bottom: var(--space-2);
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+.dialog__note {
+  color: var(--dim);
+}
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.button--primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ───────── 接続先 ───────── */
+.hosts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.hosts__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+.hosts__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.hosts__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.hosts__open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.hosts__open:hover {
+  border-color: var(--line);
+  background: var(--accent-soft);
+}
+.hosts__detail {
+  color: var(--dim);
+  font-size: var(--size-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hosts__form {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.hosts__form label {
+  color: var(--dim);
+  font-size: var(--size-small);
+}
+.hosts__form input {
+  margin-bottom: var(--space-1);
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+}
+.hosts__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
