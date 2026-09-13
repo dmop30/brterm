@@ -11,15 +11,18 @@ interface Props {
   tab?: Tab;
   server: ServerState;
   theme: ThemePreference;
+  /** 分割している面の数。1 のときは出さない。 */
+  paneCount?: number;
   onToggleTheme: () => void;
 }
 
-export function StatusBar({ tab, server, theme, onToggleTheme }: Props) {
+export function StatusBar({ tab, server, theme, paneCount = 1, onToggleTheme }: Props) {
   return (
     <div className="status" role="status">
       <div className="status__item status__item--path">{tab?.detail ?? 'タブを開いていません'}</div>
       {tab?.readOnly && <div className="status__item status__item--accent">読み取り専用</div>}
       {tab?.dirty && <div className="status__item status__item--warn">● 未保存</div>}
+      {paneCount > 1 && <div className="status__item">{paneCount} 面</div>}
       <button
         type="button"
         className="status__item"

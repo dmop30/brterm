@@ -1,4 +1,4 @@
-import { Plus, X } from 'lucide-react';
+import { Columns2, Plus, Rows2, SquareX, X } from 'lucide-react';
 
 import type { Tab, TabsState } from '../lib/tabs';
 
@@ -7,6 +7,10 @@ interface Props {
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
   onAdd: () => void;
+  onSplitRow: () => void;
+  onSplitColumn: () => void;
+  /** 面が 2 つ以上あるときだけ閉じられる */
+  onCloseGroup?: () => void;
 }
 
 function stateLabel(tab: Tab): string | undefined {
@@ -25,7 +29,15 @@ function stateLabel(tab: Tab): string | undefined {
  * 閉じるボタンをタブの中に置くため、タブ自体は button にしない
  * (button の入れ子は無効で、キーボード操作も壊れる)。
  */
-export function TabBar({ state, onActivate, onClose, onAdd }: Props) {
+export function TabBar({
+  state,
+  onActivate,
+  onClose,
+  onAdd,
+  onSplitRow,
+  onSplitColumn,
+  onCloseGroup,
+}: Props) {
   return (
     <div className="tabbar" role="tablist" aria-label="ワークスペース">
       {state.tabs.map((tab) => {
@@ -71,13 +83,44 @@ export function TabBar({ state, onActivate, onClose, onAdd }: Props) {
       })}
       <button
         type="button"
-        className="tabbar__add"
+        className="tabbar__button"
         aria-label="端末を開く"
-        title="端末を開く"
+        title="端末を開く（Alt+T）"
         onClick={onAdd}
       >
         <Plus size={15} strokeWidth={1.8} aria-hidden="true" />
       </button>
+      <div className="tabbar__tools">
+        <button
+          type="button"
+          className="tabbar__button"
+          aria-label="横に分割"
+          title="横に分割（Alt+\）"
+          onClick={onSplitRow}
+        >
+          <Columns2 size={15} strokeWidth={1.6} aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="tabbar__button"
+          aria-label="縦に分割"
+          title="縦に分割（Alt+Shift+\）"
+          onClick={onSplitColumn}
+        >
+          <Rows2 size={15} strokeWidth={1.6} aria-hidden="true" />
+        </button>
+        {onCloseGroup && (
+          <button
+            type="button"
+            className="tabbar__button"
+            aria-label="この面を閉じる"
+            title="この面を閉じる（Alt+Q。タブは隣の面へ移ります）"
+            onClick={onCloseGroup}
+          >
+            <SquareX size={15} strokeWidth={1.6} aria-hidden="true" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

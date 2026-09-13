@@ -1,12 +1,17 @@
 {
   // テスト。tsx 経由で実行するため出力はしない。
+  //
+  // 解決方式を Bundler にしてあるのは、**サーバ側(.js 付き)と画面側(拡張子なし)の
+  // どちらの import も**ここから読むため。各々の書き方の検査は、
+  // src/server/tsconfig.json(NodeNext)と tsconfig.json(Bundler)が受け持つ。
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "noEmit": true
   },
   "include": ["./**/*.ts", "../src/**/*.ts"],
-  "exclude": ["../src/client"]
+  "exclude": ["../src/client/**/*.tsx"]
 }
