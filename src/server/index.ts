@@ -19,6 +19,8 @@ const VERSION = '0.1.0';
 
 export interface AppOptions {
   context: ServerContext;
+  /** 端末と SFTP で同じ台帳を使う（SFTP は接続中のセッションに相乗りする） */
+  sessions?: SessionManager;
   /** 開発時(`npm run dev`)はトークン認証を省略する(要件定義 2 章)。 */
   devMode?: boolean;
   /** 許す Origin。省略時は待ち受け先から作る。 */
@@ -32,7 +34,7 @@ function clientDir(): string {
 }
 
 export function createApp(options: AppOptions): express.Express {
-  const { context, devMode = false } = options;
+  const { context, devMode = false, sessions = new SessionManager() } = options;
   const origins = options.origins ?? allowedOrigins(BIND_ADDRESS, SERVER_PORT, DEV_CLIENT_PORT);
 
   const app = express();
@@ -70,7 +72,7 @@ export function createApp(options: AppOptions): express.Express {
     next();
   });
 
-  app.use('/api', createApiRouter(context));
+  app.use('/api', createApiRouter(context, sessions));
 
   const dir = clientDir();
   if (existsSync(join(dir, 'index.html'))) {
@@ -92,8 +94,11 @@ if (isMain()) {
   const port = Number(process.env.BRTERM_PORT ?? SERVER_PORT);
   const host = process.env.BRTERM_HOST ?? BIND_ADDRESS;
   const context = createContext();
+  // 端末と SFTP で同じ台帳を使う
+  const sessions = new SessionManager();
   const app = createApp({
     context,
+    sessions,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
@@ -102,7 +107,7 @@ if (isMain()) {
   // 端末の入出力は WebSocket で中継する。セッションはこのプロセスが持つ。
   attachWebSocketServer(httpServer, {
     context,
-    manager: new SessionManager(),
+    manager: sessions,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });

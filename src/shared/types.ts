@@ -170,6 +170,38 @@ export interface Database {
   settings: Settings;
 }
 
+/** SFTP の一覧に出す 1 件。 */
+export interface SftpEntry {
+  name: string;
+  /** 絶対パス */
+  path: string;
+  kind: 'file' | 'directory' | 'symlink' | 'other';
+  size: number;
+  /** 権限（数値）。8 進数に直して画面に出す。 */
+  mode: number;
+  /** `rw-r--r--` の形 */
+  modeText: string;
+  /** 最終更新（ISO 8601） */
+  mtime: string;
+  /** シンボリックリンクの指す先 */
+  target?: string;
+  /**
+   * 名前を UTF-8 として読めなかった。
+   * **読めない名前のまま操作させない**(別のファイルを消しかねない)。
+   */
+  undecodable?: boolean;
+}
+
+/** 一覧の応答。上限を超えたら切り詰めて、その旨を返す。 */
+export interface SftpListResponse {
+  path: string;
+  entries: SftpEntry[];
+  /** 上限で切り詰めたか */
+  truncated: boolean;
+  /** 実際の件数 */
+  total: number;
+}
+
 /** 死活確認の応答 */
 export interface HealthResponse {
   status: 'ok';

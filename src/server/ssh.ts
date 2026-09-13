@@ -8,7 +8,13 @@
 import { randomUUID } from 'node:crypto';
 
 import iconv, { type DecoderStream } from 'iconv-lite';
-import { Client, type ClientChannel, type ConnectConfig, type HostVerifier } from 'ssh2';
+import {
+  Client,
+  type ClientChannel,
+  type ConnectConfig,
+  type HostVerifier,
+  type SFTPWrapper,
+} from 'ssh2';
 
 import type { Encoding, Host, KnownHostKey, Profile } from '../shared/types.js';
 import { AppError } from './errors.js';
@@ -157,6 +163,26 @@ export class Session {
   /** 再接続したときに戻す表示(要件定義 5 章の L1)。 */
   snapshot(): string {
     return this.scrollback.snapshot();
+  }
+
+  /**
+   * この接続に**相乗り**して SFTP を開く(要件定義 2 章)。
+   * 別に接続を張らないのは、認証をもう一度通さずに済ませるため。
+   */
+  openSftp(): Promise<SFTPWrapper> {
+    return new Promise((resolve, reject) => {
+      if (this.closed) {
+        reject(new AppError('ssh_no_session', 'セッションは既に切断されています。'));
+        return;
+      }
+      this.client.sftp((error, sftp) => {
+        if (error) {
+          reject(new AppError('ssh_no_session', 'SFTP を開けませんでした。', error.message));
+          return;
+        }
+        resolve(sftp);
+      });
+    });
   }
 
   close(): void {

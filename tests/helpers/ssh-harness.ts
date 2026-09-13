@@ -13,6 +13,8 @@ import { join } from 'node:path';
 
 import ssh2, { type Connection, type Server as SshServerType } from 'ssh2';
 
+import { serveSftp } from './sftp-server.js';
+
 import { createContext } from '../../src/server/context.js';
 import { seal } from '../../src/server/crypto.js';
 import { SessionManager } from '../../src/server/ssh.js';
@@ -26,8 +28,13 @@ const sshServers: SshServerType[] = [];
 const httpServers: HttpServer[] = [];
 const managers: SessionManager[] = [];
 
-/** 打った文字をそのまま返し、最初に挨拶を出す SSH サーバ。 */
-export async function startSshServer(options: { greeting?: Buffer } = {}): Promise<number> {
+/**
+ * 打った文字をそのまま返し、最初に挨拶を出す SSH サーバ。
+ * `sftpRoot` を渡すと、そのディレクトリを SFTP で読み書きさせる。
+ */
+export async function startSshServer(
+  options: { greeting?: Buffer; sftpRoot?: string } = {},
+): Promise<number> {
   const server = new Server({ hostKeys: [keyPair.private] }, (client: Connection) => {
     client.on('authentication', (ctx) => {
       if (ctx.method === 'password' && ctx.username === 'ops' && ctx.password === 'secret') {
@@ -49,6 +56,9 @@ export async function startSshServer(options: { greeting?: Buffer } = {}): Promi
           stream.write(options.greeting ?? Buffer.from('ようこそ\r\nops@test:~$ ', 'utf8'));
           stream.on('data', (chunk: Buffer) => stream.write(chunk));
         });
+        if (options.sftpRoot) {
+          session.on('sftp', (sftpAccept) => serveSftp(sftpAccept(), options.sftpRoot as string));
+        }
       });
     });
     client.on('error', () => {
