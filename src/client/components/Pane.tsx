@@ -2,14 +2,19 @@ import type { Tab } from '../lib/tabs';
 
 interface Props {
   tab?: Tab;
+  onAddTerminal?: () => void;
 }
 
+/** 既定のキー。ブラウザが握っている組み合わせ（Ctrl+T / Ctrl+W など）は避ける。 */
 const SHORTCUTS: [string, string][] = [
-  ['Ctrl+Tab', '次のタブへ'],
-  ['Ctrl+Shift+Tab', '前のタブへ'],
-  ['Ctrl+T', '端末を開く'],
-  ['Ctrl+W', '作業中のタブを閉じる'],
-  ['Ctrl+B', '側パネルを畳む / 出す'],
+  ['Alt+T', '端末を開く'],
+  ['Alt+W', '作業中のタブを閉じる'],
+  ['Alt+[ / Alt+]', '前 / 次のタブへ'],
+  ['Alt+\\', '横に分割（左右）'],
+  ['Alt+Shift+\\', '縦に分割（上下）'],
+  ['Alt+1 … Alt+4', 'その番号の面へ移る'],
+  ['Alt+Q', 'この面を閉じる（タブは隣の面へ）'],
+  ['Alt+B', '側パネルを畳む / 出す'],
   ['Ctrl+S', '保存（エディタ。#20 で有効になります）'],
 ];
 
@@ -17,12 +22,17 @@ const SHORTCUTS: [string, string][] = [
  * タブの中身。端末(#12)とエディタ(#20)で置き換える。
  * いまは**この画面で何ができるか**とショートカットを出しておく。
  */
-export function Pane({ tab }: Props) {
+export function Pane({ tab, onAddTerminal }: Props) {
   if (!tab) {
     return (
       <div className="pane pane--empty">
         <h2>タブを開いていません</h2>
-        <p>左のレールからセクションを選び、端末やファイルを開きます。</p>
+        <p>左のレールからセクションを選ぶか、この面で端末を開きます。</p>
+        {onAddTerminal && (
+          <button type="button" className="button" onClick={onAddTerminal}>
+            この面で端末を開く
+          </button>
+        )}
         <table className="keys">
           <tbody>
             {SHORTCUTS.map(([key, description]) => (
