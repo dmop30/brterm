@@ -50,6 +50,8 @@ export function App() {
   const [layout, setLayout] = useState<Layout>(() => loadLayout() ?? createLayout());
   const [theme, setTheme] = useState<ThemePreference>(storedTheme);
   const [server, setServer] = useState<ServerState>({ kind: 'loading' });
+  /** 端末で繋いでいる接続先。ファイルの一覧はこの接続に相乗りする。 */
+  const [connectedHost, setConnectedHost] = useState<HostView>();
   // トークンは起動時の URL で受け取り、以降はこのタブの中で覚える
   const [token] = useState<string | undefined>(() => {
     const fromUrl = tokenFromSearch(window.location.search);
@@ -120,6 +122,9 @@ export function App() {
       connection: 'disconnected' as const,
       ...(host ? { hostId: host.id } : {}),
     };
+    if (host) {
+      setConnectedHost(host);
+    }
     setLayout((previous) =>
       groupId
         ? openInActiveGroup(focusGroup(previous, groupId), tab)
@@ -222,6 +227,7 @@ export function App() {
         <SidePanel
           section={section}
           {...(token ? { token } : {})}
+          {...(connectedHost ? { connectedHost } : {})}
           onCollapse={() => setSideOpen(false)}
           onOpenHost={(host) => openTerminalIn(host)}
         />

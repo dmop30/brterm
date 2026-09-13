@@ -14,6 +14,20 @@ import type { Bookmark, Host, Profile, Settings } from '../shared/types.js';
 import { addBookmark, forHost, normalizePath, removeForHost, reorder } from './bookmarks.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
+import { isAppError } from './errors.js';
+import {
+  createFile,
+  joinPath,
+  listDirectory,
+  makeDirectory,
+  readFile,
+  removePath,
+  renamePath,
+  sftpFor,
+  statPath,
+  writeFile,
+} from './sftp.js';
+import type { SessionManager } from './ssh.js';
 
 /** 画面に返す接続先。パスワードは含めない。 */
 export interface HostView extends Omit<Host, 'password' | 'passphrase'> {
@@ -41,8 +55,37 @@ function port(value: unknown): number | undefined {
   return value;
 }
 
-export function createApiRouter(context: ServerContext): Router {
+export function createApiRouter(context: ServerContext, sessions: SessionManager): Router {
   const router = express.Router();
+
+  /** その接続先に繋がっているセッション。SFTP はこれに相乗りする。 */
+  function sessionForHost(hostId: string) {
+    return sessions.list().find((session) => session.hostId === hostId && !session.isClosed);
+  }
+
+  /** SFTP の操作をまとめて受ける。失敗は日本語のまま画面へ返す。 */
+  async function withSftp<T>(
+    res: Response,
+    hostId: string | undefined,
+    run: (sftp: Awaited<ReturnType<typeof sftpFor>>) => Promise<T>,
+  ): Promise<T | undefined> {
+    if (!hostId) {
+      fail(res, 400, 'invalid_request', '接続先を指定してください。');
+      return undefined;
+    }
+    try {
+      const sftp = await sftpFor(sessionForHost(hostId));
+      return await run(sftp);
+    } catch (error) {
+      if (isAppError(error)) {
+        const status = error.code === 'ssh_no_session' ? 409 : 400;
+        fail(res, status, error.code, error.message);
+        return undefined;
+      }
+      fail(res, 500, 'unexpected', 'SFTP の操作に失敗しました。');
+      return undefined;
+    }
+  }
 
   router.get('/hosts', (_req, res) => {
     res.json({ hosts: context.db.hosts.map(toHostView) });
@@ -259,6 +302,116 @@ export function createApiRouter(context: ServerContext): Router {
     context.db.bookmarks.splice(index, 1);
     context.save();
     res.status(204).end();
+  });
+
+  router.get('/sftp/list', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const path = text(req.query.path) ?? '.';
+    const showHidden = req.query.showHidden === 'true';
+    void withSftp(res, hostId, async (sftp) => {
+      const listed = await listDirectory(sftp, path, { showHidden });
+      res.json(listed);
+    });
+  });
+
+  router.get('/sftp/stat', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const path = text(req.query.path);
+    if (!path) {
+      fail(res, 400, 'invalid_request', 'パスを指定してください。');
+      return;
+    }
+    void withSftp(res, hostId, async (sftp) => {
+      res.json({ entry: await statPath(sftp, path) });
+    });
+  });
+
+  router.get('/sftp/download', (req, res) => {
+    const hostId = text(req.query.hostId);
+    const path = text(req.query.path);
+    if (!path) {
+      fail(res, 400, 'invalid_request', 'パスを指定してください。');
+      return;
+    }
+    void withSftp(res, hostId, async (sftp) => {
+      const data = await readFile(sftp, path);
+      res.setHeader('content-type', 'application/octet-stream');
+      // 名前は UTF-8 のまま渡す(古い形の filename= は使わない)
+      res.setHeader(
+        'content-disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(path.split('/').pop() ?? 'download')}`,
+      );
+      res.send(data);
+    });
+  });
+
+  router.post('/sftp/upload', express.raw({ type: '*/*', limit: '512mb' }), (req, res) => {
+    const hostId = text(req.query.hostId);
+    const directory = text(req.query.path);
+    const name = text(req.query.name);
+    if (!directory || !name) {
+      fail(res, 400, 'invalid_request', '置き場所とファイル名を指定してください。');
+      return;
+    }
+    void withSftp(res, hostId, async (sftp) => {
+      const target = joinPath(directory, name);
+      await writeFile(sftp, target, req.body as Buffer);
+      res.status(201).json({ entry: await statPath(sftp, target) });
+    });
+  });
+
+  router.post('/sftp/mkdir', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const path = text(body.path);
+    if (!path) {
+      fail(res, 400, 'invalid_request', 'パスを指定してください。');
+      return;
+    }
+    void withSftp(res, text(body.hostId), async (sftp) => {
+      await makeDirectory(sftp, path);
+      res.status(201).json({ entry: await statPath(sftp, path) });
+    });
+  });
+
+  router.post('/sftp/create', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const path = text(body.path);
+    if (!path) {
+      fail(res, 400, 'invalid_request', 'パスを指定してください。');
+      return;
+    }
+    void withSftp(res, text(body.hostId), async (sftp) => {
+      await createFile(sftp, path);
+      res.status(201).json({ entry: await statPath(sftp, path) });
+    });
+  });
+
+  router.post('/sftp/rename', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const from = text(body.from);
+    const to = text(body.to);
+    if (!from || !to) {
+      fail(res, 400, 'invalid_request', '元のパスと新しいパスを指定してください。');
+      return;
+    }
+    void withSftp(res, text(body.hostId), async (sftp) => {
+      await renamePath(sftp, from, to);
+      res.json({ entry: await statPath(sftp, to) });
+    });
+  });
+
+  router.post('/sftp/remove', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const path = text(body.path);
+    if (!path) {
+      fail(res, 400, 'invalid_request', 'パスを指定してください。');
+      return;
+    }
+    // 画面で確認を取ってから呼ばれる前提。フォルダは recursive を明示させる。
+    void withSftp(res, text(body.hostId), async (sftp) => {
+      await removePath(sftp, path, body.recursive === true);
+      res.status(204).end();
+    });
   });
 
   router.get('/profiles', (_req, res) => {

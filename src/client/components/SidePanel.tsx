@@ -1,14 +1,19 @@
 import { PanelLeftClose } from 'lucide-react';
 
+import { FilesPanel } from './FilesPanel';
 import { HostsPanel, type HostView } from './HostsPanel';
 import { RAIL_SECTIONS, type RailSection } from './Rail';
 
 interface Props {
   section: RailSection;
   token?: string;
+  /** いま端末で繋いでいる接続先（SFTP はこれに相乗りする） */
+  connectedHost?: HostView;
   onCollapse: () => void;
   /** 接続先を選んで端末を開く */
   onOpenHost: (host: HostView) => void;
+  /** ファイルの一覧から「ここで端末を開く」 */
+  onOpenTerminalAt?: (path: string) => void;
 }
 
 /**
@@ -23,7 +28,14 @@ const PLACEHOLDER: Record<RailSection, { empty: string; issue: string }> = {
   settings: { empty: '設定項目はまだありません。', issue: '項目が確定する #15 で入ります。' },
 };
 
-export function SidePanel({ section, token, onCollapse, onOpenHost }: Props) {
+export function SidePanel({
+  section,
+  token,
+  connectedHost,
+  onCollapse,
+  onOpenHost,
+  onOpenTerminalAt,
+}: Props) {
   const label = RAIL_SECTIONS.find((entry) => entry.id === section)?.label ?? '';
   const placeholder = PLACEHOLDER[section];
   return (
@@ -43,6 +55,12 @@ export function SidePanel({ section, token, onCollapse, onOpenHost }: Props) {
       <div className="side__body">
         {section === 'hosts' ? (
           <HostsPanel token={token} onOpen={onOpenHost} />
+        ) : section === 'files' ? (
+          <FilesPanel
+            token={token}
+            {...(connectedHost ? { host: connectedHost } : {})}
+            {...(onOpenTerminalAt ? { onOpenTerminalAt } : {})}
+          />
         ) : (
           <div className="side__empty">
             <p>{placeholder.empty}</p>
