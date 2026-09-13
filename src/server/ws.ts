@@ -11,8 +11,11 @@ import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { ClientMessage, ServerMessage } from '../shared/protocol.js';
 import type { Host, Profile } from '../shared/types.js';
+import { CommandLine } from './command-line.js';
 import type { ServerContext } from './context.js';
 import { open as openSealed } from './crypto.js';
+import { confirmMessage, judgeCommand } from './dangerous.js';
+import { recordCommand } from './history.js';
 import { AppError, isAppError } from './errors.js';
 import { rememberHostKey } from './hostkey.js';
 import { defaultProfile } from './store.js';
@@ -57,6 +60,13 @@ function secretsFor(
   return secrets;
 }
 
+/** 危険コマンドの確認待ち。返事が来るまで改行を握っておく。 */
+interface PendingConfirm {
+  command: string;
+  /** 改行より後に届いていた打鍵。受け入れたらこの順で流し直す。 */
+  rest: string;
+}
+
 /** 1 本の接続が持つ状態。 */
 interface Connection {
   socket: WebSocket;
@@ -64,6 +74,9 @@ interface Connection {
   detach?: () => void;
   /** ホスト鍵の確認待ち。画面の返事でこれを解く。 */
   pendingHostKey?: (accept: boolean) => void;
+  /** いま打っている行。履歴と危険コマンドの判定に使う。 */
+  line: CommandLine;
+  pendingConfirm?: PendingConfirm;
 }
 
 export function attachWebSocketServer(
@@ -93,12 +106,16 @@ export function attachWebSocketServer(
   });
 
   wss.on('connection', (socket: WebSocket) => {
-    const connection: Connection = { socket };
+    const connection: Connection = { socket, line: new CommandLine() };
 
     const bind = (session: Session, snapshot: string) => {
       connection.session = session;
       connection.detach?.();
-      const offData = session.onData((data) => send(socket, { type: 'data', data }));
+      const offData = session.onData((data) => {
+        // パスワードを求められている最中かどうかは、出力を見ないと分からない
+        connection.line.noteOutput(data);
+        send(socket, { type: 'data', data });
+      });
       const offClose = session.onClose(() => send(socket, { type: 'closed' }));
       connection.detach = () => {
         offData();
@@ -157,6 +174,81 @@ export function attachWebSocketServer(
       bind(session, session.snapshot());
     };
 
+    /** 確定した行を実行する。改行はここでだけ送る。 */
+    const runLine = (command: string) => {
+      connection.line.reset();
+      const session = connection.session;
+      session?.write('\r');
+      // 繋ぎ直した後でも残せるよう、接続先はセッションから取る
+      if (session && recordCommand(context.db, { hostId: session.hostId, command })) {
+        context.save();
+      }
+    };
+
+    /**
+     * 打鍵を 1 文字ずつ見る。
+     *
+     * 危険コマンドのときは**改行だけ握って**画面に尋ねる。改行より後に届いた打鍵も
+     * 一緒に預かる(先に流すと順番が入れ替わる)。
+     */
+    const feedInput = (data: string) => {
+      const characters = [...data];
+      let buffered = '';
+
+      const flush = () => {
+        if (buffered !== '') {
+          connection.session?.write(buffered);
+          buffered = '';
+        }
+      };
+
+      for (let index = 0; index < characters.length; index += 1) {
+        const char = characters[index] as string;
+
+        // 確認待ちの最中に届いた打鍵は、返事が決まるまで預かる
+        if (connection.pendingConfirm) {
+          connection.pendingConfirm.rest += char;
+          continue;
+        }
+
+        const result = connection.line.feedChar(char);
+        if (result.line === undefined) {
+          buffered += char;
+          continue;
+        }
+
+        const command = result.line;
+        if (result.secret || command === '') {
+          // パスワードは履歴にも判定にも回さない
+          buffered += char;
+          continue;
+        }
+
+        const verdict = context.db.settings.confirmDangerousCommands
+          ? judgeCommand(command)
+          : { dangerous: false as const };
+
+        if (verdict.dangerous) {
+          flush();
+          // 改行を送っていないので、シェル側の行は残っている。こちらの控えも戻す
+          connection.line.restore(command);
+          connection.pendingConfirm = { command, rest: characters.slice(index + 1).join('') };
+          send(socket, {
+            type: 'confirm',
+            command,
+            message: confirmMessage(command, verdict, connection.session?.hostname ?? '接続先'),
+            reason: verdict.reason ?? '',
+          });
+          return;
+        }
+
+        flush();
+        runLine(command);
+      }
+
+      flush();
+    };
+
     socket.on('message', (raw) => {
       let message: ClientMessage;
       try {
@@ -189,7 +281,7 @@ export function attachWebSocketServer(
         }
         case 'input':
           try {
-            connection.session?.write(message.data);
+            feedInput(message.data);
           } catch (error) {
             fail(error);
           }
@@ -201,6 +293,24 @@ export function attachWebSocketServer(
           const resolve = connection.pendingHostKey;
           connection.pendingHostKey = undefined as never;
           resolve?.(message.accept);
+          return;
+        }
+        case 'confirm-decision': {
+          const pending = connection.pendingConfirm;
+          connection.pendingConfirm = undefined as never;
+          if (!pending) {
+            return;
+          }
+          if (!message.accept) {
+            // 実行しない。打った行はシェル側に残したままにする(直して使えるように)
+            return;
+          }
+          try {
+            runLine(pending.command);
+            feedInput(pending.rest);
+          } catch (error) {
+            fail(error);
+          }
           return;
         }
         case 'close':

@@ -17,6 +17,8 @@ export type ClientMessage =
   | { type: 'resize'; cols: number; rows: number }
   /** 未確認のホスト鍵を受け入れるか */
   | { type: 'hostkey-decision'; accept: boolean }
+  /** 危険コマンドを実行してよいか */
+  | { type: 'confirm-decision'; accept: boolean }
   /** セッションを終わらせる */
   | { type: 'close' };
 
@@ -28,6 +30,11 @@ export type ServerMessage =
   | { type: 'data'; data: string }
   /** ホスト鍵の確認を求める。画面は指紋を出して利用者に尋ねる */
   | { type: 'hostkey'; hostname: string; port: number; fingerprint: string }
+  /**
+   * 危険コマンドの実行前確認を求める。**返事が来るまで改行は送らない**。
+   * `message` は対象(ホスト名・パス)を含んだ、そのまま出せる日本語。
+   */
+  | { type: 'confirm'; command: string; message: string; reason: string }
   /** セッションが切れた */
   | { type: 'closed' }
   /** 失敗した。`message` はそのまま画面に出せる日本語 */
