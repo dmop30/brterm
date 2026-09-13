@@ -17,6 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 対応環境の下限(要件定義 7 章)と新しめの版の両方で回す。
+        # 実測: Node 22 だけで見ていたら、20.11 で落ちる書き方に気付けなかった。
+        node: ['20.11', '22']
+    name: check (Node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -25,7 +32,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: '20.11'
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: 依存導入

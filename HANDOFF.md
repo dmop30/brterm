@@ -52,4 +52,10 @@
   ビルドツールが無い環境では警告が出るだけ。
 - `cron-parser` は v4 が保守終了(`npm install` が deprecated 警告を出す)のため **v5** を入れた。
   v5 は API が `CronExpressionParser.parse()` に変わっている。予定実行の実装時に注意。
+- **CI が 1 回落ちた。** `node --test "tests/**/*.test.ts"` のグロブ展開は Node 22 では効くが
+  **20.11 では効かない**(「Could not find」で失敗)。sh のグロブは再帰しないため npm script
+  への直書きでも解決しない。`scripts/run-tests.mjs` で自分で集める形にし、
+  **CI は Node 20.11 と 22 の両方で回す**ようにした(対応環境の下限で落ちる書き方に気付くため)。
+- eslint 10 の依存が Node 20.19+ を要求するため、Node 20.11 の CI では EBADENGINE 警告が出る。
+  検査自体は通る。アプリの実行には関係しない(開発ツールのみ)。
 - SessionStart hook は毎回 `npm ci` を走らせる(約 6 秒)。同期実行のままにしてある。

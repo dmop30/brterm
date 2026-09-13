@@ -27,7 +27,8 @@
       "type": "node",
       "request": "launch",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["--import", "tsx", "--test", "tests/**/*.test.ts"],
+      "runtimeArgs": ["${workspaceFolder}/scripts/run-tests.mjs"],
+      "autoAttachChildProcesses": true,
       "console": "integratedTerminal",
       "skipFiles": ["<node_internals>/**"]
     },
