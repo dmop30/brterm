@@ -16,7 +16,17 @@ export type AppErrorCode =
   /** ローカル鍵が読めない */
   | 'key_unreadable'
   /** 金庫が施錠されている */
-  | 'vault_locked';
+  | 'vault_locked'
+  /** SSH の認証に失敗した */
+  | 'ssh_auth_failed'
+  /** SSH で接続先に届かない */
+  | 'ssh_unreachable'
+  /** ホスト鍵が既知のものと違う。**推測で続行しない** */
+  | 'ssh_host_key_changed'
+  /** ホスト鍵が未知で、利用者が受け入れなかった */
+  | 'ssh_host_key_rejected'
+  /** セッションが無い・既に閉じている */
+  | 'ssh_no_session';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;
