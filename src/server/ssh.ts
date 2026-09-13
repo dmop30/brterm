@@ -7,12 +7,21 @@
  */
 import { randomUUID } from 'node:crypto';
 
+import iconv, { type DecoderStream } from 'iconv-lite';
 import { Client, type ClientChannel, type ConnectConfig, type HostVerifier } from 'ssh2';
 
-import type { Host, KnownHostKey, Profile } from '../shared/types.js';
+import type { Encoding, Host, KnownHostKey, Profile } from '../shared/types.js';
 import { AppError } from './errors.js';
 import { fingerprintOf, verifyHostKey, type HostKeyVerdict } from './hostkey.js';
 import { Scrollback } from './scrollback.js';
+
+/** 要件定義の文字コード名を iconv-lite の名前に直す。 */
+export function iconvName(encoding: Encoding): string {
+  if (encoding === 'shift_jis') {
+    return 'Shift_JIS';
+  }
+  return encoding === 'euc-jp' ? 'EUC-JP' : 'utf8';
+}
 
 /** 未知のホスト鍵を見せて可否を尋ねるときの情報。 */
 export interface HostKeyPrompt {
@@ -60,6 +69,12 @@ export class Session {
   private readonly client: Client;
   private readonly stream: ClientChannel;
   private readonly scrollback: Scrollback;
+  /**
+   * 文字コードの変換器。**塊ごとに decode しない**。
+   * 多バイト文字が塊の境目で切れると化けるため、状態を持つ変換器を使う。
+   */
+  private readonly decoder: DecoderStream;
+  private readonly encoding: Encoding;
   private readonly dataListeners = new Set<DataListener>();
   private readonly closeListeners = new Set<CloseListener>();
   private closed = false;
@@ -71,6 +86,7 @@ export class Session {
     client: Client,
     stream: ClientChannel,
     hostKey: { fingerprint: string; verdict: HostKeyVerdict },
+    encoding: Encoding = 'utf-8',
     scrollbackLimit?: number,
   ) {
     this.hostId = host.id;
@@ -78,19 +94,19 @@ export class Session {
     this.client = client;
     this.stream = stream;
     this.hostKey = hostKey;
+    this.encoding = encoding;
+    this.decoder = iconv.getDecoder(iconvName(encoding));
     this.scrollback = new Scrollback(scrollbackLimit);
 
-    // 文字コード変換は #10 で入れる。ここでは bytes をそのまま latin1 で保持せず、
-    // 端末が既定とする UTF-8 で解釈する。
     stream.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
+      const text = this.decoder.write(chunk);
       this.scrollback.append(text);
       for (const listener of this.dataListeners) {
         listener(text);
       }
     });
     stream.stderr.on('data', (chunk: Buffer) => {
-      const text = chunk.toString('utf8');
+      const text = this.decoder.write(chunk);
       this.scrollback.append(text);
       for (const listener of this.dataListeners) {
         listener(text);
@@ -124,11 +140,12 @@ export class Session {
     return () => this.closeListeners.delete(listener);
   }
 
+  /** 画面から来た文字を、接続先の文字コードに直して送る。 */
   write(text: string): void {
     if (this.closed) {
       throw new AppError('ssh_no_session', 'セッションは既に切断されています。');
     }
-    this.stream.write(text);
+    this.stream.write(iconv.encode(text, iconvName(this.encoding)));
   }
 
   resize(cols: number, rows: number): void {
@@ -297,6 +314,7 @@ export function connect(options: ConnectOptions): Promise<Session> {
             client,
             stream,
             hostKey ?? { fingerprint: '', verdict: 'unknown' },
+            profile.encoding,
             options.scrollbackLimit,
           ),
         );
