@@ -17,7 +17,7 @@ import {
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
-import type { Database, Profile, Settings } from '../shared/types.js';
+import type { Database, Host, Profile, Settings } from '../shared/types.js';
 import { AppError } from './errors.js';
 import { dataDir } from './paths.js';
 
@@ -61,6 +61,18 @@ export function defaultDatabase(): Database {
     knownHostKeys: [],
     settings: defaultSettings(),
   };
+}
+
+/**
+ * 接続先が使うプロファイル。
+ * 紐付いていない・消えているときは既定へ落とす(接続できなくなるのを避ける)。
+ */
+export function profileFor(db: Database, host: Host): Profile {
+  return (
+    db.profiles.find((profile) => profile.id === host.profileId) ??
+    db.profiles.find((profile) => profile.id === 'default') ??
+    defaultProfile()
+  );
 }
 
 function dbPath(dir: string): string {

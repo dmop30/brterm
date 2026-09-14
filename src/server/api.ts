@@ -7,13 +7,48 @@
  * - 破壊的な操作(削除)は、対象が存在しないときも理由を明示する
  */
 import { randomUUID } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 import express, { type Request, type Response, type Router } from 'express';
 
-import type { Host, Procedure, ProcedureStep, Profile, Settings } from '../shared/types.js';
+import type {
+  Host,
+  Procedure,
+  ProcedureStep,
+  Profile,
+  Schedule,
+  Settings,
+} from '../shared/types.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
+import { isAppError } from './errors.js';
 import { listHistory, trimHistory } from './history.js';
+import {
+  generateKey,
+  installCommand,
+  parseSshConfig,
+  readKeyFile,
+  readSshConfig,
+  upsertSshConfigHost,
+  writeKey,
+  writeSshConfig,
+  type KeyType,
+} from './keys.js';
+import {
+  keysDir as defaultKeysDir,
+  logsDir as defaultLogsDir,
+  sshConfigPath as defaultSshConfigPath,
+} from './paths.js';
+import {
+  createSshExecutor,
+  isValidCron,
+  nextRunAt,
+  readLog,
+  runSchedule,
+  type Executor,
+} from './scheduler.js';
+import type { SessionManager } from './ssh.js';
 import { makeProcedure, makeStep, stepsFromHistory, toMarkdown } from './procedures.js';
 
 /** 画面に返す接続先。パスワードは含めない。 */
@@ -42,8 +77,25 @@ function port(value: unknown): number | undefined {
   return value;
 }
 
-export function createApiRouter(context: ServerContext): Router {
+export interface ApiOptions {
+  /** 鍵の配置に使う。開いているセッションを通して `authorized_keys` を書く */
+  manager?: SessionManager;
+  /** 鍵の置き場。検証で差し替えるため */
+  keysDir?: string;
+  /** `~/.ssh/config` の場所。検証で差し替えるため */
+  sshConfigPath?: string;
+  /** 予定実行のログ置き場。検証で差し替えるため */
+  logsDir?: string;
+  /** 予定実行の中身。検証では SSH を使わない役に差し替える */
+  executor?: Executor;
+}
+
+export function createApiRouter(context: ServerContext, options: ApiOptions = {}): Router {
   const router = express.Router();
+  const keysDir = options.keysDir ?? defaultKeysDir();
+  const sshConfigPath = options.sshConfigPath ?? defaultSshConfigPath();
+  const logsDir = options.logsDir ?? defaultLogsDir();
+  const executor = options.executor ?? createSshExecutor(context.key);
 
   router.get('/hosts', (_req, res) => {
     res.json({ hosts: context.db.hosts.map(toHostView) });
@@ -92,6 +144,10 @@ export function createApiRouter(context: ServerContext): Router {
     }
     const profileId = text(body.profileId);
     if (profileId) {
+      if (!context.db.profiles.some((profile) => profile.id === profileId)) {
+        fail(res, 400, 'profile_not_found', '指定されたプロファイルがありません。');
+        return;
+      }
       host.profileId = profileId;
     }
 
@@ -165,6 +221,19 @@ export function createApiRouter(context: ServerContext): Router {
         delete host.privateKeyPath;
       }
     }
+    // 空文字を渡したら既定のプロファイルへ戻す
+    if (typeof body.profileId === 'string') {
+      const profileId = text(body.profileId);
+      if (profileId) {
+        if (!context.db.profiles.some((profile) => profile.id === profileId)) {
+          fail(res, 400, 'profile_not_found', '指定されたプロファイルがありません。');
+          return;
+        }
+        host.profileId = profileId;
+      } else {
+        delete host.profileId;
+      }
+    }
 
     host.updatedAt = new Date().toISOString();
     context.save();
@@ -211,6 +280,67 @@ export function createApiRouter(context: ServerContext): Router {
     context.db.profiles.push(profile);
     context.save();
     res.status(201).json({ profile });
+  });
+
+  router.patch('/profiles/:id', (req, res) => {
+    const profile = context.db.profiles.find((entry) => entry.id === req.params.id);
+    if (!profile) {
+      fail(res, 404, 'profile_not_found', '指定されたプロファイルがありません。');
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    if (label) {
+      profile.label = label;
+    }
+    if (body.encoding === 'utf-8' || body.encoding === 'shift_jis' || body.encoding === 'euc-jp') {
+      profile.encoding = body.encoding;
+    }
+    const term = text(body.term);
+    if (term) {
+      profile.term = term;
+    }
+    // env と onConnect は**渡されたときだけ**丸ごと入れ替える(空で消せるように)
+    if (typeof body.env === 'object' && body.env !== null && !Array.isArray(body.env)) {
+      profile.env = Object.fromEntries(
+        Object.entries(body.env as Record<string, unknown>)
+          .filter(([, value]) => typeof value === 'string')
+          .map(([name, value]) => [name, value as string]),
+      );
+    }
+    if (Array.isArray(body.onConnect)) {
+      profile.onConnect = body.onConnect
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter((item) => item !== '');
+    }
+    context.save();
+    res.json({ profile });
+  });
+
+  router.delete('/profiles/:id', (req, res) => {
+    // 既定は消させない。消えると、紐付いていない接続先の拠り所が無くなる
+    if (req.params.id === 'default') {
+      fail(res, 400, 'profile_protected', '既定のプロファイルは消せません。');
+      return;
+    }
+    const index = context.db.profiles.findIndex((entry) => entry.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'profile_not_found', '指定されたプロファイルがありません。');
+      return;
+    }
+    context.db.profiles.splice(index, 1);
+    // 迷子の参照を残さない。使っていた接続先は既定へ戻す
+    let detached = 0;
+    for (const host of context.db.hosts) {
+      if (host.profileId === req.params.id) {
+        delete host.profileId;
+        host.updatedAt = new Date().toISOString();
+        detached += 1;
+      }
+    }
+    context.save();
+    res.json({ removed: true, detached });
   });
 
   router.get('/settings', (_req, res) => {
@@ -383,6 +513,270 @@ export function createApiRouter(context: ServerContext): Router {
     res
       .type('text/markdown; charset=utf-8')
       .send(toMarkdown(procedure, host ? { hostLabel: host.label } : {}));
+  });
+
+  // ---- SSH 鍵 --------------------------------------------------------------
+
+  /** 鍵置き場にある鍵。**秘密鍵の中身は返さない**（場所だけ）。 */
+  router.get('/keys', (_req, res) => {
+    if (!existsSync(keysDir)) {
+      res.json({ keys: [], dir: keysDir });
+      return;
+    }
+    const keys = readdirSync(keysDir)
+      .filter((name) => name.endsWith('.pub'))
+      .map((name) => readKeyFile(join(keysDir, name)));
+    res.json({ keys, dir: keysDir });
+  });
+
+  router.post('/keys', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const name = text(body.name);
+    if (!name) {
+      fail(res, 400, 'invalid_key_name', '鍵の名前を入力してください。');
+      return;
+    }
+    const type: KeyType = body.type === 'rsa' ? 'rsa' : 'ed25519';
+    try {
+      const generated = generateKey({
+        type,
+        ...(typeof body.bits === 'number' ? { bits: body.bits } : {}),
+        ...(text(body.comment) ? { comment: text(body.comment) as string } : {}),
+        ...(text(body.passphrase) ? { passphrase: text(body.passphrase) as string } : {}),
+      });
+      const written = writeKey(keysDir, name, generated);
+      // 秘密鍵の中身は返さない。場所と公開鍵と指紋だけ渡す
+      res.status(201).json({
+        key: {
+          name,
+          type: written.type,
+          privateKeyPath: written.privateKeyPath,
+          publicKeyPath: written.publicKeyPath,
+          publicKey: written.publicKey,
+          fingerprint: written.fingerprint,
+        },
+      });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, error.code === 'key_exists' ? 409 : 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * 公開鍵を接続先の `authorized_keys` へ置く。
+   *
+   * **開いているセッションを通して行う。** ここで新しく繋ぐと、ホスト鍵の確認を
+   * 画面に出せない（未確認の鍵を黙って受け入れることになる）ため、安全側に倒している。
+   */
+  router.post('/keys/:name/install', async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const hostId = text(body.hostId);
+    if (!hostId) {
+      fail(res, 400, 'invalid_host', '置き先の接続先を指定してください。');
+      return;
+    }
+    const host = context.db.hosts.find((entry) => entry.id === hostId);
+    if (!host) {
+      fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
+      return;
+    }
+    const publicKeyPath = join(keysDir, `${req.params.name}.pub`);
+    if (!existsSync(publicKeyPath)) {
+      fail(res, 404, 'key_not_found', 'その鍵はありません。');
+      return;
+    }
+    const session = options.manager?.list().find((item) => item.hostId === hostId);
+    if (!session || session.isClosed) {
+      fail(
+        res,
+        409,
+        'ssh_no_session',
+        `${host.label} に繋がっていません。先に端末でこの接続先へ繋いでください。`,
+      );
+      return;
+    }
+
+    try {
+      const key = readKeyFile(publicKeyPath);
+      const result = await session.exec(installCommand(key.publicKey));
+      if (result.code !== 0) {
+        fail(
+          res,
+          502,
+          'key_install_failed',
+          `${host.label} に鍵を置けませんでした。${result.stderr.trim()}`,
+        );
+        return;
+      }
+      res.json({ installed: true, fingerprint: key.fingerprint });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
+  });
+
+  // ---- ~/.ssh/config -------------------------------------------------------
+
+  router.get('/ssh-config', (_req, res) => {
+    const text_ = readSshConfig(sshConfigPath);
+    res.json({ path: sshConfigPath, hosts: parseSshConfig(text_), text: text_ });
+  });
+
+  /** Host の記述を差し替える。手で書いた記述は残す。 */
+  router.put('/ssh-config/hosts/:host', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    try {
+      const updated = upsertSshConfigHost(readSshConfig(sshConfigPath), {
+        host: req.params.host,
+        ...(text(body.hostName) ? { hostName: text(body.hostName) as string } : {}),
+        ...(text(body.user) ? { user: text(body.user) as string } : {}),
+        ...(port(body.port) === undefined ? {} : { port: port(body.port) as number }),
+        ...(text(body.identityFile) ? { identityFile: text(body.identityFile) as string } : {}),
+      });
+      writeSshConfig(sshConfigPath, updated);
+      res.json({ path: sshConfigPath, hosts: parseSshConfig(updated) });
+    } catch (error) {
+      if (isAppError(error)) {
+        fail(res, 400, error.code, error.message);
+        return;
+      }
+      throw error;
+    }
+  });
+
+  // ---- 予定実行 ------------------------------------------------------------
+
+  /** 予定と、その次回実行時刻。式がおかしいものは `nextRunAt` を出さない。 */
+  function scheduleView(schedule: Schedule): Schedule & { nextRunAt?: string } {
+    if (!schedule.enabled || !isValidCron(schedule.cron)) {
+      return { ...schedule };
+    }
+    return { ...schedule, nextRunAt: nextRunAt(schedule.cron).toISOString() };
+  }
+
+  function commandsFrom(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+  }
+
+  router.get('/schedules', (_req, res) => {
+    res.json({ schedules: context.db.schedules.map(scheduleView) });
+  });
+
+  router.post('/schedules', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    const hostId = text(body.hostId);
+    const cron = text(body.cron);
+    const commands = commandsFrom(body.commands);
+
+    if (!label || !hostId || !cron) {
+      fail(res, 400, 'invalid_schedule', '名前・接続先・予定の書き方は必ず入力してください。');
+      return;
+    }
+    if (!context.db.hosts.some((host) => host.id === hostId)) {
+      fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
+      return;
+    }
+    if (!isValidCron(cron)) {
+      fail(res, 400, 'schedule_invalid_cron', `予定の書き方が正しくありません: ${cron}`);
+      return;
+    }
+    if (commands.length === 0) {
+      fail(res, 400, 'invalid_schedule', '実行するコマンドを 1 つ以上入れてください。');
+      return;
+    }
+
+    const schedule: Schedule = {
+      id: randomUUID(),
+      label,
+      hostId,
+      cron,
+      commands,
+      // 新しい予定は**止まった状態**で作る。作った瞬間に流れると事故になる
+      enabled: body.enabled === true,
+    };
+    context.db.schedules.push(schedule);
+    context.save();
+    res.status(201).json({ schedule: scheduleView(schedule) });
+  });
+
+  router.patch('/schedules/:id', (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    if (label) {
+      schedule.label = label;
+    }
+    const cron = text(body.cron);
+    if (cron) {
+      if (!isValidCron(cron)) {
+        fail(res, 400, 'schedule_invalid_cron', `予定の書き方が正しくありません: ${cron}`);
+        return;
+      }
+      schedule.cron = cron;
+    }
+    if (Array.isArray(body.commands)) {
+      const commands = commandsFrom(body.commands);
+      if (commands.length === 0) {
+        fail(res, 400, 'invalid_schedule', '実行するコマンドを 1 つ以上入れてください。');
+        return;
+      }
+      schedule.commands = commands;
+    }
+    if (typeof body.enabled === 'boolean') {
+      schedule.enabled = body.enabled;
+    }
+    context.save();
+    res.json({ schedule: scheduleView(schedule) });
+  });
+
+  router.delete('/schedules/:id', (req, res) => {
+    const index = context.db.schedules.findIndex((entry) => entry.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    context.db.schedules.splice(index, 1);
+    context.save();
+    res.json({ removed: true });
+  });
+
+  /** 今すぐ 1 回流す。予定の書き方を確かめるときに使う。 */
+  router.post('/schedules/:id/run', async (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    const status = await runSchedule(context.db, schedule, { logsDir, executor });
+    context.save();
+    res.json({ status, schedule: scheduleView(schedule) });
+  });
+
+  /** 実行ログ。**機密は書かない**方針で残している(要件定義 8 章)。 */
+  router.get('/schedules/:id/log', (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    res.type('text/plain; charset=utf-8').send(readLog(logsDir, schedule));
   });
 
   return router;

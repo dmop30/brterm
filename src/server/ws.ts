@@ -10,15 +10,15 @@ import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { ClientMessage, ServerMessage } from '../shared/protocol.js';
-import type { Host, Profile } from '../shared/types.js';
+
 import { CommandLine } from './command-line.js';
 import type { ServerContext } from './context.js';
-import { open as openSealed } from './crypto.js';
 import { confirmMessage, judgeCommand } from './dangerous.js';
+import { secretsFor } from './secrets.js';
 import { recordCommand } from './history.js';
 import { AppError, isAppError } from './errors.js';
 import { rememberHostKey } from './hostkey.js';
-import { defaultProfile } from './store.js';
+import { profileFor } from './store.js';
 import { connect, SessionManager, type HostKeyPrompt, type Session } from './ssh.js';
 import { isAllowedOrigin, tokenFromRequest, tokenMatches } from './token.js';
 
@@ -35,29 +35,6 @@ function send(socket: WebSocket, message: ServerMessage): void {
   if (socket.readyState === socket.OPEN) {
     socket.send(JSON.stringify(message));
   }
-}
-
-function profileFor(context: ServerContext, host: Host): Profile {
-  return (
-    context.db.profiles.find((profile) => profile.id === host.profileId) ??
-    context.db.profiles.find((profile) => profile.id === 'default') ??
-    defaultProfile()
-  );
-}
-
-/** 保存された秘密を開く。開けないときは、状態を明示して止める(推測で続行しない)。 */
-function secretsFor(
-  context: ServerContext,
-  host: Host,
-): { password?: string; passphrase?: string } {
-  const secrets: { password?: string; passphrase?: string } = {};
-  if (host.password) {
-    secrets.password = openSealed(context.key, host.password);
-  }
-  if (host.passphrase) {
-    secrets.passphrase = openSealed(context.key, host.passphrase);
-  }
-  return secrets;
 }
 
 /** 危険コマンドの確認待ち。返事が来るまで改行を握っておく。 */
@@ -143,11 +120,11 @@ export function attachWebSocketServer(
         return;
       }
 
-      const profile = profileFor(context, host);
+      const profile = profileFor(context.db, host);
       const session = await connect({
         host,
         profile,
-        ...secretsFor(context, host),
+        ...secretsFor(context.key, host),
         known: context.db.knownHostKeys,
         cols: message.cols ?? 80,
         rows: message.rows ?? 24,
@@ -172,6 +149,11 @@ export function attachWebSocketServer(
 
       manager.add(session);
       bind(session, session.snapshot());
+
+      // 接続時コマンドは**履歴に残さない**(利用者が打ったものではない。要件定義 3 章)
+      for (const command of profile.onConnect) {
+        session.write(`${command}\r`);
+      }
     };
 
     /** 確定した行を実行する。改行はここでだけ送る。 */

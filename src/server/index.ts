@@ -10,7 +10,8 @@ import { BIND_ADDRESS, DEV_CLIENT_PORT, SERVER_PORT } from '../shared/defaults.j
 import type { HealthResponse } from '../shared/types.js';
 import { createApiRouter } from './api.js';
 import { createContext, type ServerContext } from './context.js';
-import { dataDir } from './paths.js';
+import { dataDir, logsDir } from './paths.js';
+import { createSshExecutor, Scheduler, type Executor } from './scheduler.js';
 import { SessionManager } from './ssh.js';
 import { allowedOrigins, isAllowedOrigin, tokenFromRequest, tokenMatches } from './token.js';
 import { attachWebSocketServer } from './ws.js';
@@ -19,6 +20,14 @@ const VERSION = '0.1.0';
 
 export interface AppOptions {
   context: ServerContext;
+  /** 端末セッションの台帳。鍵の配置で、開いているセッションを使う */
+  manager?: SessionManager;
+  /** 鍵の置き場と `~/.ssh/config` の場所。検証で差し替えるため */
+  keysDir?: string;
+  sshConfigPath?: string;
+  /** 予定実行のログ置き場と実行役。検証で差し替えるため */
+  logsDir?: string;
+  executor?: Executor;
   /** 開発時(`npm run dev`)はトークン認証を省略する(要件定義 2 章)。 */
   devMode?: boolean;
   /** 許す Origin。省略時は待ち受け先から作る。 */
@@ -70,7 +79,16 @@ export function createApp(options: AppOptions): express.Express {
     next();
   });
 
-  app.use('/api', createApiRouter(context));
+  app.use(
+    '/api',
+    createApiRouter(context, {
+      ...(options.manager ? { manager: options.manager } : {}),
+      ...(options.keysDir ? { keysDir: options.keysDir } : {}),
+      ...(options.sshConfigPath ? { sshConfigPath: options.sshConfigPath } : {}),
+      ...(options.logsDir ? { logsDir: options.logsDir } : {}),
+      ...(options.executor ? { executor: options.executor } : {}),
+    }),
+  );
 
   const dir = clientDir();
   if (existsSync(join(dir, 'index.html'))) {
@@ -92,8 +110,11 @@ if (isMain()) {
   const port = Number(process.env.BRTERM_PORT ?? SERVER_PORT);
   const host = process.env.BRTERM_HOST ?? BIND_ADDRESS;
   const context = createContext();
+  // API(鍵の配置)と WebSocket で**同じ台帳**を見る
+  const manager = new SessionManager();
   const app = createApp({
     context,
+    manager,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
@@ -102,10 +123,18 @@ if (isMain()) {
   // 端末の入出力は WebSocket で中継する。セッションはこのプロセスが持つ。
   attachWebSocketServer(httpServer, {
     context,
-    manager: new SessionManager(),
+    manager,
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
+
+  // 予定実行の見張り。**過ぎた分の取り返しはしない**（要件定義 11 章）
+  const scheduler = new Scheduler(context.db, {
+    logsDir: logsDir(),
+    executor: createSshExecutor(context.key),
+    save: () => context.save(),
+  });
+  scheduler.start();
 
   httpServer.listen(port, host, () => {
     // 秘密情報は出さない。ただし**トークンは起動した本人にだけ**必要なので、

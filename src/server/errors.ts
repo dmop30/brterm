@@ -26,7 +26,21 @@ export type AppErrorCode =
   /** ホスト鍵が未知で、利用者が受け入れなかった */
   | 'ssh_host_key_rejected'
   /** セッションが無い・既に閉じている */
-  | 'ssh_no_session';
+  | 'ssh_no_session'
+  /** 鍵として読めない */
+  | 'key_invalid'
+  /** 鍵の名前に使えない文字が入っている */
+  | 'key_invalid_name'
+  /** 鍵の覚え書きに使えない文字が入っている */
+  | 'key_invalid_comment'
+  /** 鍵長の指定が不正 */
+  | 'key_invalid_bits'
+  /** 同じ名前の鍵が既にある。**上書きしない** */
+  | 'key_exists'
+  /** `~/.ssh/config` の Host 名が不正 */
+  | 'ssh_config_invalid_host'
+  /** 予定(cron)の書き方が不正 */
+  | 'schedule_invalid_cron';
 
 export class AppError extends Error {
   readonly code: AppErrorCode;
