@@ -10,7 +10,7 @@ import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { ClientMessage, ServerMessage } from '../shared/protocol.js';
-import type { Host, Profile } from '../shared/types.js';
+
 import { CommandLine } from './command-line.js';
 import type { ServerContext } from './context.js';
 import { confirmMessage, judgeCommand } from './dangerous.js';
@@ -18,7 +18,7 @@ import { secretsFor } from './secrets.js';
 import { recordCommand } from './history.js';
 import { AppError, isAppError } from './errors.js';
 import { rememberHostKey } from './hostkey.js';
-import { defaultProfile } from './store.js';
+import { profileFor } from './store.js';
 import { connect, SessionManager, type HostKeyPrompt, type Session } from './ssh.js';
 import { isAllowedOrigin, tokenFromRequest, tokenMatches } from './token.js';
 
@@ -35,14 +35,6 @@ function send(socket: WebSocket, message: ServerMessage): void {
   if (socket.readyState === socket.OPEN) {
     socket.send(JSON.stringify(message));
   }
-}
-
-function profileFor(context: ServerContext, host: Host): Profile {
-  return (
-    context.db.profiles.find((profile) => profile.id === host.profileId) ??
-    context.db.profiles.find((profile) => profile.id === 'default') ??
-    defaultProfile()
-  );
 }
 
 /** 危険コマンドの確認待ち。返事が来るまで改行を握っておく。 */
@@ -128,7 +120,7 @@ export function attachWebSocketServer(
         return;
       }
 
-      const profile = profileFor(context, host);
+      const profile = profileFor(context.db, host);
       const session = await connect({
         host,
         profile,

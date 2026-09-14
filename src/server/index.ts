@@ -10,7 +10,8 @@ import { BIND_ADDRESS, DEV_CLIENT_PORT, SERVER_PORT } from '../shared/defaults.j
 import type { HealthResponse } from '../shared/types.js';
 import { createApiRouter } from './api.js';
 import { createContext, type ServerContext } from './context.js';
-import { dataDir } from './paths.js';
+import { dataDir, logsDir } from './paths.js';
+import { createSshExecutor, Scheduler, type Executor } from './scheduler.js';
 import { SessionManager } from './ssh.js';
 import { allowedOrigins, isAllowedOrigin, tokenFromRequest, tokenMatches } from './token.js';
 import { attachWebSocketServer } from './ws.js';
@@ -24,6 +25,9 @@ export interface AppOptions {
   /** 鍵の置き場と `~/.ssh/config` の場所。検証で差し替えるため */
   keysDir?: string;
   sshConfigPath?: string;
+  /** 予定実行のログ置き場と実行役。検証で差し替えるため */
+  logsDir?: string;
+  executor?: Executor;
   /** 開発時(`npm run dev`)はトークン認証を省略する(要件定義 2 章)。 */
   devMode?: boolean;
   /** 許す Origin。省略時は待ち受け先から作る。 */
@@ -81,6 +85,8 @@ export function createApp(options: AppOptions): express.Express {
       ...(options.manager ? { manager: options.manager } : {}),
       ...(options.keysDir ? { keysDir: options.keysDir } : {}),
       ...(options.sshConfigPath ? { sshConfigPath: options.sshConfigPath } : {}),
+      ...(options.logsDir ? { logsDir: options.logsDir } : {}),
+      ...(options.executor ? { executor: options.executor } : {}),
     }),
   );
 
@@ -121,6 +127,14 @@ if (isMain()) {
     devMode,
     origins: allowedOrigins(host, port, devMode ? DEV_CLIENT_PORT : undefined),
   });
+
+  // 予定実行の見張り。**過ぎた分の取り返しはしない**（要件定義 11 章）
+  const scheduler = new Scheduler(context.db, {
+    logsDir: logsDir(),
+    executor: createSshExecutor(context.key),
+    save: () => context.save(),
+  });
+  scheduler.start();
 
   httpServer.listen(port, host, () => {
     // 秘密情報は出さない。ただし**トークンは起動した本人にだけ**必要なので、

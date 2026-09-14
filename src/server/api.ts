@@ -12,7 +12,14 @@ import { join } from 'node:path';
 
 import express, { type Request, type Response, type Router } from 'express';
 
-import type { Host, Procedure, ProcedureStep, Profile, Settings } from '../shared/types.js';
+import type {
+  Host,
+  Procedure,
+  ProcedureStep,
+  Profile,
+  Schedule,
+  Settings,
+} from '../shared/types.js';
 import type { ServerContext } from './context.js';
 import { seal } from './crypto.js';
 import { isAppError } from './errors.js';
@@ -28,7 +35,19 @@ import {
   writeSshConfig,
   type KeyType,
 } from './keys.js';
-import { keysDir as defaultKeysDir, sshConfigPath as defaultSshConfigPath } from './paths.js';
+import {
+  keysDir as defaultKeysDir,
+  logsDir as defaultLogsDir,
+  sshConfigPath as defaultSshConfigPath,
+} from './paths.js';
+import {
+  createSshExecutor,
+  isValidCron,
+  nextRunAt,
+  readLog,
+  runSchedule,
+  type Executor,
+} from './scheduler.js';
 import type { SessionManager } from './ssh.js';
 import { makeProcedure, makeStep, stepsFromHistory, toMarkdown } from './procedures.js';
 
@@ -65,12 +84,18 @@ export interface ApiOptions {
   keysDir?: string;
   /** `~/.ssh/config` の場所。検証で差し替えるため */
   sshConfigPath?: string;
+  /** 予定実行のログ置き場。検証で差し替えるため */
+  logsDir?: string;
+  /** 予定実行の中身。検証では SSH を使わない役に差し替える */
+  executor?: Executor;
 }
 
 export function createApiRouter(context: ServerContext, options: ApiOptions = {}): Router {
   const router = express.Router();
   const keysDir = options.keysDir ?? defaultKeysDir();
   const sshConfigPath = options.sshConfigPath ?? defaultSshConfigPath();
+  const logsDir = options.logsDir ?? defaultLogsDir();
+  const executor = options.executor ?? createSshExecutor(context.key);
 
   router.get('/hosts', (_req, res) => {
     res.json({ hosts: context.db.hosts.map(toHostView) });
@@ -623,6 +648,135 @@ export function createApiRouter(context: ServerContext, options: ApiOptions = {}
       }
       throw error;
     }
+  });
+
+  // ---- 予定実行 ------------------------------------------------------------
+
+  /** 予定と、その次回実行時刻。式がおかしいものは `nextRunAt` を出さない。 */
+  function scheduleView(schedule: Schedule): Schedule & { nextRunAt?: string } {
+    if (!schedule.enabled || !isValidCron(schedule.cron)) {
+      return { ...schedule };
+    }
+    return { ...schedule, nextRunAt: nextRunAt(schedule.cron).toISOString() };
+  }
+
+  function commandsFrom(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter((item) => item !== '');
+  }
+
+  router.get('/schedules', (_req, res) => {
+    res.json({ schedules: context.db.schedules.map(scheduleView) });
+  });
+
+  router.post('/schedules', (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    const hostId = text(body.hostId);
+    const cron = text(body.cron);
+    const commands = commandsFrom(body.commands);
+
+    if (!label || !hostId || !cron) {
+      fail(res, 400, 'invalid_schedule', '名前・接続先・予定の書き方は必ず入力してください。');
+      return;
+    }
+    if (!context.db.hosts.some((host) => host.id === hostId)) {
+      fail(res, 404, 'host_not_found', '指定された接続先が見つかりません。');
+      return;
+    }
+    if (!isValidCron(cron)) {
+      fail(res, 400, 'schedule_invalid_cron', `予定の書き方が正しくありません: ${cron}`);
+      return;
+    }
+    if (commands.length === 0) {
+      fail(res, 400, 'invalid_schedule', '実行するコマンドを 1 つ以上入れてください。');
+      return;
+    }
+
+    const schedule: Schedule = {
+      id: randomUUID(),
+      label,
+      hostId,
+      cron,
+      commands,
+      // 新しい予定は**止まった状態**で作る。作った瞬間に流れると事故になる
+      enabled: body.enabled === true,
+    };
+    context.db.schedules.push(schedule);
+    context.save();
+    res.status(201).json({ schedule: scheduleView(schedule) });
+  });
+
+  router.patch('/schedules/:id', (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const label = text(body.label);
+    if (label) {
+      schedule.label = label;
+    }
+    const cron = text(body.cron);
+    if (cron) {
+      if (!isValidCron(cron)) {
+        fail(res, 400, 'schedule_invalid_cron', `予定の書き方が正しくありません: ${cron}`);
+        return;
+      }
+      schedule.cron = cron;
+    }
+    if (Array.isArray(body.commands)) {
+      const commands = commandsFrom(body.commands);
+      if (commands.length === 0) {
+        fail(res, 400, 'invalid_schedule', '実行するコマンドを 1 つ以上入れてください。');
+        return;
+      }
+      schedule.commands = commands;
+    }
+    if (typeof body.enabled === 'boolean') {
+      schedule.enabled = body.enabled;
+    }
+    context.save();
+    res.json({ schedule: scheduleView(schedule) });
+  });
+
+  router.delete('/schedules/:id', (req, res) => {
+    const index = context.db.schedules.findIndex((entry) => entry.id === req.params.id);
+    if (index < 0) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    context.db.schedules.splice(index, 1);
+    context.save();
+    res.json({ removed: true });
+  });
+
+  /** 今すぐ 1 回流す。予定の書き方を確かめるときに使う。 */
+  router.post('/schedules/:id/run', async (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    const status = await runSchedule(context.db, schedule, { logsDir, executor });
+    context.save();
+    res.json({ status, schedule: scheduleView(schedule) });
+  });
+
+  /** 実行ログ。**機密は書かない**方針で残している(要件定義 8 章)。 */
+  router.get('/schedules/:id/log', (req, res) => {
+    const schedule = context.db.schedules.find((entry) => entry.id === req.params.id);
+    if (!schedule) {
+      fail(res, 404, 'schedule_not_found', 'その予定は見つかりません。');
+      return;
+    }
+    res.type('text/plain; charset=utf-8').send(readLog(logsDir, schedule));
   });
 
   return router;
